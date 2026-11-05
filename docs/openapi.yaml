@@ -1,0 +1,1900 @@
+openapi: 3.1.0
+info:
+  title: ServiDesk API
+  version: 0.9.0
+  summary: Contratos HTTP de los 6 microservicios de ServiDesk (propuesta pendiente de aprobación).
+  description: |
+    Cada microservicio tiene su propia HTTP API en API Gateway, por eso cada ruta declara su `servers`.
+    Todas las rutas, salvo `POST /auth/login`, requieren `Authorization: Bearer <JWT>`; el tenant y el schema
+    salen del token validado por el Lambda Authorizer y nunca del body ni de la query.
+    Documentación en prosa: docs/API_CONTRACTS.md.
+
+tags:
+  - name: identity
+    description: Login, usuarios y equipos (ms-identity)
+  - name: cmdb
+    description: Elementos de configuración (ms-cmdb)
+  - name: incidents
+    description: Incidentes y comentarios (ms-incidents)
+  - name: problems
+    description: Problemas y errores conocidos (ms-problems)
+  - name: changes
+    description: Solicitudes de cambio y CAB (ms-changes)
+  - name: requests
+    description: Catálogo y solicitudes de servicio (ms-requests)
+
+security:
+  - bearerAuth: []
+
+x-servers:
+  identity: &srvIdentity
+    - url: "{baseUrl}"
+      description: VITE_API_IDENTITY_URL
+      variables: { baseUrl: { default: https://identity.example.execute-api.us-east-1.amazonaws.com } }
+  cmdb: &srvCmdb
+    - url: "{baseUrl}"
+      description: VITE_API_CMDB_URL
+      variables: { baseUrl: { default: https://cmdb.example.execute-api.us-east-1.amazonaws.com } }
+  incidents: &srvIncidents
+    - url: "{baseUrl}"
+      description: VITE_API_INCIDENTS_URL
+      variables: { baseUrl: { default: https://incidents.example.execute-api.us-east-1.amazonaws.com } }
+  problems: &srvProblems
+    - url: "{baseUrl}"
+      description: VITE_API_PROBLEMS_URL
+      variables: { baseUrl: { default: https://problems.example.execute-api.us-east-1.amazonaws.com } }
+  changes: &srvChanges
+    - url: "{baseUrl}"
+      description: VITE_API_CHANGES_URL
+      variables: { baseUrl: { default: https://changes.example.execute-api.us-east-1.amazonaws.com } }
+  requests: &srvRequests
+    - url: "{baseUrl}"
+      description: VITE_API_REQUESTS_URL
+      variables: { baseUrl: { default: https://requests.example.execute-api.us-east-1.amazonaws.com } }
+
+paths:
+  # ======================= ms-identity =======================
+  /auth/login:
+    servers: *srvIdentity
+    post:
+      tags: [identity]
+      operationId: login
+      summary: Iniciar sesión (ID-01)
+      x-status: B
+      x-roles: [public]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+            example: { tenant_code: andina, email: lucia.paredes@andina.pe, password: "Andina#2026" }
+      responses:
+        "200":
+          description: Credenciales válidas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/LoginResponse" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/InvalidCredentials" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /auth/me:
+    servers: *srvIdentity
+    get:
+      tags: [identity]
+      operationId: getMe
+      summary: Usuario autenticado (ID-02)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      responses:
+        "200": { $ref: "#/components/responses/AuthUserResponse" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /users:
+    servers: *srvIdentity
+    get:
+      tags: [identity]
+      operationId: listUsers
+      summary: Listar usuarios (ID-03)
+      x-status: A-parcial
+      x-roles: [admin, agent]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/sortOrder"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [created_at, full_name, email], default: created_at }
+        - name: role
+          in: query
+          description: Uno o varios roles separados por comas
+          schema: { type: string, example: "agent,admin" }
+        - name: active
+          in: query
+          schema: { type: boolean }
+        - name: ids
+          in: query
+          description: Hasta 100 UUID separados por comas
+          schema: { type: string }
+      responses:
+        "200":
+          description: Página de usuarios
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [identity]
+      operationId: createUser
+      summary: Crear usuario (ID-05)
+      x-status: C
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUserRequest" }
+            example: { email: jorge.huaman@andina.pe, full_name: Jorge Huamán Ríos, role: customer, password: "Temporal#2026", active: true }
+      responses:
+        "201": { $ref: "#/components/responses/UserCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /users/{id}:
+    servers: *srvIdentity
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [identity]
+      operationId: getUser
+      summary: Consultar usuario (ID-04)
+      x-status: C
+      x-roles: [admin, agent]
+      responses:
+        "200": { $ref: "#/components/responses/UserResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [identity]
+      operationId: updateUser
+      summary: Actualizar usuario (ID-06)
+      x-status: C
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateUserRequest" }
+            example: { role: agent, active: false }
+      responses:
+        "200": { $ref: "#/components/responses/UserResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /teams:
+    servers: *srvIdentity
+    get:
+      tags: [identity]
+      operationId: listTeams
+      summary: Listar equipos (ID-07)
+      x-status: C
+      x-roles: [admin, agent]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/sortOrder"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [name], default: name }
+      responses:
+        "200":
+          description: Página de equipos
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ======================= ms-cmdb =======================
+  /cis:
+    servers: *srvCmdb
+    get:
+      tags: [cmdb]
+      operationId: listCis
+      summary: Listar elementos de configuración (CM-01)
+      x-status: A-parcial
+      x-roles: [admin, agent]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/sortOrder"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [created_at, updated_at, name, status], default: created_at }
+        - name: status
+          in: query
+          description: Uno o varios de operational, degraded, down, retired (separados por comas)
+          schema: { type: string }
+        - name: environment
+          in: query
+          description: Uno o varios de prod, qa, dev
+          schema: { type: string }
+        - name: type_id
+          in: query
+          schema: { type: integer }
+        - name: owner_team_id
+          in: query
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Página de CI
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConfigurationItemPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [cmdb]
+      operationId: createCi
+      summary: Registrar elemento (CM-02)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateConfigurationItemRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/CiCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /cis/{id}:
+    servers: *srvCmdb
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [cmdb]
+      operationId: getCi
+      summary: Consultar elemento (CM-03)
+      x-status: C
+      x-roles: [admin, agent]
+      responses:
+        "200": { $ref: "#/components/responses/CiResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [cmdb]
+      operationId: updateCi
+      summary: Actualizar elemento (CM-04)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateConfigurationItemRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/CiResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    delete:
+      tags: [cmdb]
+      operationId: deleteCi
+      summary: Eliminar elemento, baja lógica a retired (CM-06)
+      x-status: C
+      x-roles: [admin]
+      responses:
+        "204": { description: CI retirado }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /cis/{id}/status:
+    servers: *srvCmdb
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      tags: [cmdb]
+      operationId: updateCiStatus
+      summary: Cambiar estado del elemento (CM-05)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateConfigurationItemStatusRequest" }
+            example: { status: down }
+      responses:
+        "200": { $ref: "#/components/responses/CiResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /cis/{id}/relations:
+    servers: *srvCmdb
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [cmdb]
+      operationId: listCiRelations
+      summary: Relaciones del elemento (CM-07)
+      x-status: C
+      x-roles: [admin, agent]
+      responses:
+        "200":
+          description: Relaciones entrantes y salientes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/CIRelationView" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /ci-types:
+    servers: *srvCmdb
+    get:
+      tags: [cmdb]
+      operationId: listCiTypes
+      summary: Tipos de CI (CM-08)
+      x-status: C
+      x-roles: [admin, agent]
+      responses:
+        "200":
+          description: Lista completa (sin paginar)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/CIType" } }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ======================= ms-incidents =======================
+  /incidents:
+    servers: *srvIncidents
+    get:
+      tags: [incidents]
+      operationId: listIncidents
+      summary: Listar incidentes (IN-01)
+      x-status: A
+      x-roles: [admin, agent, customer]
+      description: Para customer el backend filtra por reporter_id = sub.
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/sortOrder"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [created_at, priority, sla_due_at, status, key], default: created_at }
+        - name: status
+          in: query
+          description: Uno o varios de new, in_progress, on_hold, resolved, closed
+          schema: { type: string, example: "new,in_progress" }
+        - name: priority
+          in: query
+          description: Uno o varios de P1, P2, P3, P4
+          schema: { type: string }
+        - name: impact
+          in: query
+          schema: { type: string }
+        - name: urgency
+          in: query
+          schema: { type: string }
+        - $ref: "#/components/parameters/assigneeFilter"
+        - name: team_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: ci_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: problem_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: channel
+          in: query
+          schema: { $ref: "#/components/schemas/IncidentChannel" }
+        - name: sla_breached
+          in: query
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: Página de incidentes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IncidentPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [incidents]
+      operationId: createIncident
+      summary: Crear incidente (IN-02)
+      x-status: B
+      x-roles: [admin, agent, customer]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateIncidentRequest" }
+            example:
+              title: No carga el sistema de historias clínicas
+              description: Desde las 8:10 la aplicación muestra error 502 en todas las sedes.
+              impact: high
+              urgency: high
+              ci_id: 8c2d4e6f-1a3b-4c5d-8e7f-9a0b1c2d3e4f
+      responses:
+        "201": { $ref: "#/components/responses/IncidentCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /incidents/{id}:
+    servers: *srvIncidents
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [incidents]
+      operationId: getIncident
+      summary: Consultar incidente (IN-03)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      responses:
+        "200": { $ref: "#/components/responses/IncidentResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [incidents]
+      operationId: updateIncident
+      summary: Actualizar incidente (IN-04)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateIncidentRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/IncidentResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /incidents/{id}/status:
+    servers: *srvIncidents
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      tags: [incidents]
+      operationId: updateIncidentStatus
+      summary: Cambiar estado del incidente (IN-05)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateIncidentStatusRequest" }
+            example: { status: resolved, comment: Se reinició el pool de conexiones del balanceador. }
+      responses:
+        "200": { $ref: "#/components/responses/IncidentResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /incidents/{id}/comments:
+    servers: *srvIncidents
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [incidents]
+      operationId: listIncidentComments
+      summary: Listar comentarios (IN-06)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [created_at], default: created_at }
+        - name: sort_order
+          in: query
+          schema: { type: string, enum: [asc, desc], default: asc }
+      responses:
+        "200":
+          description: Página de comentarios
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IncidentCommentPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [incidents]
+      operationId: createIncidentComment
+      summary: Agregar comentario (IN-07)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateIncidentCommentRequest" }
+            example: { body: Adjunto captura del error en la sede San Isidro., internal: false }
+      responses:
+        "201":
+          description: Comentario creado
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties: { data: { $ref: "#/components/schemas/IncidentComment" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ======================= ms-problems =======================
+  /problems:
+    servers: *srvProblems
+    get:
+      tags: [problems]
+      operationId: listProblems
+      summary: Listar problemas (PR-01)
+      x-status: A-parcial
+      x-roles: [admin, agent]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/sortOrder"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [created_at, priority, status, key], default: created_at }
+        - name: status
+          in: query
+          description: Uno o varios de new, investigating, known_error, resolved, closed
+          schema: { type: string }
+        - name: priority
+          in: query
+          schema: { type: string }
+        - name: ci_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: owner_id
+          in: query
+          description: '"me" o un UUID'
+          schema: { type: string }
+      responses:
+        "200":
+          description: Página de problemas
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProblemPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [problems]
+      operationId: createProblem
+      summary: Crear problema (PR-02)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateProblemRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/ProblemCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /problems/{id}:
+    servers: *srvProblems
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [problems]
+      operationId: getProblem
+      summary: Consultar problema (PR-03)
+      x-status: C
+      x-roles: [admin, agent]
+      responses:
+        "200": { $ref: "#/components/responses/ProblemResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [problems]
+      operationId: updateProblem
+      summary: Actualizar problema (PR-04)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProblemRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ProblemResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /problems/{id}/status:
+    servers: *srvProblems
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      tags: [problems]
+      operationId: updateProblemStatus
+      summary: Cambiar estado del problema (PR-05)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateProblemStatusRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ProblemResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /problems/{id}/known-error:
+    servers: *srvProblems
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [problems]
+      operationId: publishKnownError
+      summary: Publicar error conocido (PR-06)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublishKnownErrorRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/ProblemCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /problems/{id}/incidents:
+    servers: *srvProblems
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [problems]
+      operationId: linkProblemIncidents
+      summary: Vincular incidentes (PR-07)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LinkIncidentsRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ProblemResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ======================= ms-changes =======================
+  /changes:
+    servers: *srvChanges
+    get:
+      tags: [changes]
+      operationId: listChanges
+      summary: Listar cambios (CH-01), también sirve de calendario
+      x-status: A-parcial
+      x-roles: [admin, agent]
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/sortOrder"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [created_at, planned_start, risk, status, key], default: created_at }
+        - name: status
+          in: query
+          description: Uno o varios de draft, submitted, approved, rejected, scheduled, implemented, failed
+          schema: { type: string }
+        - name: type
+          in: query
+          schema: { type: string }
+        - name: risk
+          in: query
+          schema: { type: string }
+        - name: requester_id
+          in: query
+          description: '"me" o un UUID'
+          schema: { type: string }
+        - name: planned_from
+          in: query
+          schema: { type: string, format: date-time }
+        - name: planned_to
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: Página de cambios
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChangePage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [changes]
+      operationId: createChange
+      summary: Crear solicitud de cambio (CH-02)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateChangeRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/ChangeCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /changes/{id}:
+    servers: *srvChanges
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [changes]
+      operationId: getChange
+      summary: Consultar cambio (CH-03)
+      x-status: C
+      x-roles: [admin, agent]
+      responses:
+        "200": { $ref: "#/components/responses/ChangeResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [changes]
+      operationId: updateChange
+      summary: Actualizar cambio, solo en draft (CH-04)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateChangeRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ChangeResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /changes/{id}/status:
+    servers: *srvChanges
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      tags: [changes]
+      operationId: updateChangeStatus
+      summary: Cambiar estado del cambio (CH-05)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateChangeStatusRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ChangeResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /changes/{id}/approve:
+    servers: *srvChanges
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [changes]
+      operationId: approveChange
+      summary: Aprobar cambio (CH-06)
+      x-status: C
+      x-roles: [admin]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApproveChangeRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ChangeResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /changes/{id}/reject:
+    servers: *srvChanges
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    post:
+      tags: [changes]
+      operationId: rejectChange
+      summary: Rechazar cambio (CH-07)
+      x-status: C
+      x-roles: [admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RejectChangeRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ChangeResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ======================= ms-requests =======================
+  /catalog:
+    servers: *srvRequests
+    get:
+      tags: [requests]
+      operationId: listCatalog
+      summary: Catálogo de servicios (RQ-01)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      parameters:
+        - name: category_id
+          in: query
+          schema: { type: integer }
+        - $ref: "#/components/parameters/search"
+      responses:
+        "200":
+          description: Lista completa (sin paginar)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { type: array, items: { $ref: "#/components/schemas/CatalogItem" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /requests:
+    servers: *srvRequests
+    get:
+      tags: [requests]
+      operationId: listRequests
+      summary: Listar solicitudes (RQ-02)
+      x-status: A-parcial
+      x-roles: [admin, agent, customer]
+      description: Para customer el backend filtra por requester_id = sub.
+      parameters:
+        - $ref: "#/components/parameters/page"
+        - $ref: "#/components/parameters/limit"
+        - $ref: "#/components/parameters/search"
+        - $ref: "#/components/parameters/sortOrder"
+        - name: sort_by
+          in: query
+          schema: { type: string, enum: [created_at, status, key], default: created_at }
+        - name: status
+          in: query
+          description: Uno o varios de submitted, pending_approval, approved, in_fulfillment, fulfilled, rejected
+          schema: { type: string }
+        - name: catalog_item_id
+          in: query
+          schema: { type: string, format: uuid }
+        - name: requester_id
+          in: query
+          description: '"me" o un UUID'
+          schema: { type: string }
+        - $ref: "#/components/parameters/assigneeFilter"
+      responses:
+        "200":
+          description: Página de solicitudes
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServiceRequestPage" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    post:
+      tags: [requests]
+      operationId: createRequest
+      summary: Crear solicitud (RQ-03)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateServiceRequestRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/ServiceRequestCreated" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /requests/{id}:
+    servers: *srvRequests
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    get:
+      tags: [requests]
+      operationId: getRequest
+      summary: Consultar solicitud (RQ-04)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      responses:
+        "200": { $ref: "#/components/responses/ServiceRequestResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+    patch:
+      tags: [requests]
+      operationId: updateRequest
+      summary: Actualizar solicitud (RQ-05)
+      x-status: C
+      x-roles: [admin, agent, customer]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateServiceRequestRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ServiceRequestResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /requests/{id}/status:
+    servers: *srvRequests
+    parameters: [{ $ref: "#/components/parameters/id" }]
+    put:
+      tags: [requests]
+      operationId: updateRequestStatus
+      summary: Cambiar estado de la solicitud (RQ-06)
+      x-status: C
+      x-roles: [admin, agent]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateServiceRequestStatusRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/ServiceRequestResponse" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 'JWT HS256 emitido por POST /auth/login. Claims: sub, tenant_id, schema, role, iat, exp.'
+
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    search:
+      name: search
+      in: query
+      schema: { type: string, minLength: 2, maxLength: 100 }
+    sortOrder:
+      name: sort_order
+      in: query
+      schema: { type: string, enum: [asc, desc], default: desc }
+    assigneeFilter:
+      name: assignee_id
+      in: query
+      description: '"me" (usuario del token), "none" (sin asignar) o un UUID'
+      schema: { type: string }
+
+  responses:
+    ValidationError:
+      description: Datos inválidos
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: La solicitud tiene campos inválidos
+              details: [{ field: title, issue: Debe tener entre 3 y 200 caracteres }]
+              request_id: c0a8e3f4-1b2d-4e5f-9a6b-7c8d9e0f1a2b
+    InvalidCredentials:
+      description: Tenant, email o contraseña incorrectos
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { error: { code: INVALID_CREDENTIALS, message: Credenciales inválidas } }
+    GatewayUnauthorized:
+      description: Falta el header Authorization (respuesta de API Gateway, sin invocar al authorizer)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/GatewayError" }
+          example: { message: Unauthorized }
+    Forbidden:
+      description: |
+        Dos orígenes posibles: API Gateway responde {"message":"Forbidden"} cuando el token es inválido o venció;
+        el microservicio responde {"error":{"code":"FORBIDDEN"}} cuando el rol no tiene permiso.
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/GatewayError"
+              - $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: No existe en el schema del tenant (o, para customer, no es suyo)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { error: { code: NOT_FOUND, message: Recurso no encontrado } }
+    Conflict:
+      description: Transición de estado no permitida, recurso no editable o duplicado
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example:
+            error:
+              code: INVALID_STATUS_TRANSITION
+              message: Transición de estado no permitida
+              details: [{ field: status, issue: "De 'closed' no se puede pasar a 'in_progress'" }]
+    InternalError:
+      description: Error no controlado
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example: { error: { code: INTERNAL_ERROR, message: Error interno, request_id: c0a8e3f4-1b2d-4e5f-9a6b-7c8d9e0f1a2b } }
+
+    AuthUserResponse:
+      description: Usuario autenticado
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/AuthUser" } }
+    UserResponse:
+      description: Usuario
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/User" } }
+    UserCreated:
+      description: Usuario creado
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/User" } }
+    CiResponse:
+      description: Elemento de configuración
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ConfigurationItem" } }
+    CiCreated:
+      description: Elemento creado
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ConfigurationItem" } }
+    IncidentResponse:
+      description: Incidente
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/Incident" } }
+    IncidentCreated:
+      description: Incidente creado
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/Incident" } }
+    ProblemResponse:
+      description: Problema con incidentes vinculados y error conocido
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ProblemDetail" } }
+    ProblemCreated:
+      description: Problema creado o error conocido publicado
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ProblemDetail" } }
+    ChangeResponse:
+      description: Cambio con CI afectados y aprobaciones
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ChangeDetail" } }
+    ChangeCreated:
+      description: Cambio creado en estado draft
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ChangeDetail" } }
+    ServiceRequestResponse:
+      description: Solicitud con aprobaciones
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ServiceRequestDetail" } }
+    ServiceRequestCreated:
+      description: Solicitud creada
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [data]
+            properties: { data: { $ref: "#/components/schemas/ServiceRequestDetail" } }
+
+  schemas:
+    # ---------- Comunes ----------
+    UUID: { type: string, format: uuid }
+    NullableUUID: { type: [string, "null"], format: uuid }
+    DateTime: { type: string, format: date-time, description: 'ISO 8601 UTC, p. ej. 2026-11-05T19:20:25Z' }
+    NullableDateTime: { type: [string, "null"], format: date-time }
+    Role: { type: string, enum: [admin, agent, customer] }
+    Priority: { type: string, enum: [P1, P2, P3, P4] }
+    Level: { type: string, enum: [high, medium, low], description: Valores propuestos en D6 }
+
+    PaginationMeta:
+      type: object
+      required: [page, limit, total, total_pages]
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+        total_pages: { type: integer, minimum: 0 }
+
+    FieldError:
+      type: object
+      required: [field, issue]
+      properties:
+        field: { type: string }
+        issue: { type: string }
+
+    ErrorCode:
+      type: string
+      enum: [VALIDATION_ERROR, INVALID_CREDENTIALS, UNAUTHENTICATED, FORBIDDEN, NOT_FOUND, CONFLICT,
+             EMAIL_ALREADY_EXISTS, INVALID_STATUS_TRANSITION, NOT_IMPLEMENTED, INTERNAL_ERROR]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: "#/components/schemas/ErrorCode" }
+            message: { type: string }
+            details: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+            request_id: { type: string }
+
+    GatewayError:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string, enum: [Unauthorized, Forbidden] }
+
+    JwtPayload:
+      type: object
+      required: [sub, tenant_id, schema, role, iat, exp]
+      properties:
+        sub: { $ref: "#/components/schemas/UUID" }
+        tenant_id: { type: string, pattern: "^[a-z0-9_]+$", example: andina }
+        schema: { type: string, pattern: "^tenant_[a-z0-9_]+$", example: tenant_andina }
+        role: { $ref: "#/components/schemas/Role" }
+        iat: { type: integer }
+        exp: { type: integer }
+
+    # ---------- Identity ----------
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [tenant_code, email, password]
+      properties:
+        tenant_code: { type: string, pattern: "^[a-z0-9_]{2,30}$" }
+        email: { type: string, format: email, maxLength: 254 }
+        password: { type: string, minLength: 8, maxLength: 128 }
+
+    TenantSummary:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string, example: andina }
+        name: { type: string, example: Andina Retail }
+
+    User:
+      type: object
+      required: [id, email, full_name, role, active, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        email: { type: string, format: email }
+        full_name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        active: { type: boolean }
+        created_at: { $ref: "#/components/schemas/DateTime" }
+
+    AuthUser:
+      allOf:
+        - $ref: "#/components/schemas/User"
+        - type: object
+          required: [tenant]
+          properties:
+            tenant: { $ref: "#/components/schemas/TenantSummary" }
+
+    LoginResponse:
+      type: object
+      required: [access_token, token_type, expires_in, user]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer, example: 3600 }
+        user: { $ref: "#/components/schemas/AuthUser" }
+
+    CreateUserRequest:
+      type: object
+      additionalProperties: false
+      required: [email, full_name, role, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        full_name: { type: string, minLength: 3, maxLength: 150 }
+        role: { $ref: "#/components/schemas/Role" }
+        password: { type: string, minLength: 8, maxLength: 128 }
+        active: { type: boolean, default: true }
+
+    UpdateUserRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        full_name: { type: string, minLength: 3, maxLength: 150 }
+        role: { $ref: "#/components/schemas/Role" }
+        active: { type: boolean }
+        password: { type: string, minLength: 8, maxLength: 128 }
+
+    Team:
+      type: object
+      required: [id, name, description]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        name: { type: string }
+        description: { type: [string, "null"] }
+
+    UserPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/User" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+
+    TeamPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Team" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+
+    # ---------- CMDB ----------
+    CIStatus: { type: string, enum: [operational, degraded, down, retired] }
+    CIEnvironment: { type: string, enum: [prod, qa, dev] }
+    CIRelationType: { type: string, enum: [depends_on, runs_on, connects_to] }
+
+    CIType:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+
+    ConfigurationItem:
+      type: object
+      required: [id, type_id, type_name, name, status, environment, version, owner_team_id, attributes, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        type_id: { type: integer }
+        type_name: { type: string, description: Derivado (JOIN ci_types) }
+        name: { type: string }
+        status: { $ref: "#/components/schemas/CIStatus" }
+        environment: { $ref: "#/components/schemas/CIEnvironment" }
+        version: { type: [string, "null"] }
+        owner_team_id: { $ref: "#/components/schemas/NullableUUID" }
+        attributes: { type: object, additionalProperties: true }
+        created_at: { $ref: "#/components/schemas/DateTime", description: Columna pendiente de agregar al ER (D9) }
+        updated_at: { $ref: "#/components/schemas/DateTime" }
+
+    CreateConfigurationItemRequest:
+      type: object
+      additionalProperties: false
+      required: [type_id, name, environment]
+      properties:
+        type_id: { type: integer }
+        name: { type: string, minLength: 2, maxLength: 150 }
+        environment: { $ref: "#/components/schemas/CIEnvironment" }
+        version: { type: [string, "null"], maxLength: 50 }
+        owner_team_id: { $ref: "#/components/schemas/NullableUUID" }
+        attributes: { type: object, additionalProperties: true }
+
+    UpdateConfigurationItemRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        type_id: { type: integer }
+        name: { type: string, minLength: 2, maxLength: 150 }
+        environment: { $ref: "#/components/schemas/CIEnvironment" }
+        version: { type: [string, "null"], maxLength: 50 }
+        owner_team_id: { $ref: "#/components/schemas/NullableUUID" }
+        attributes: { type: object, additionalProperties: true }
+
+    UpdateConfigurationItemStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { $ref: "#/components/schemas/CIStatus" }
+
+    CIRelationView:
+      type: object
+      required: [id, relation, direction, ci]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        relation: { $ref: "#/components/schemas/CIRelationType" }
+        direction: { type: string, enum: [outgoing, incoming] }
+        ci:
+          type: object
+          required: [id, name, status, type_name]
+          properties:
+            id: { $ref: "#/components/schemas/UUID" }
+            name: { type: string }
+            status: { $ref: "#/components/schemas/CIStatus" }
+            type_name: { type: string }
+
+    ConfigurationItemPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/ConfigurationItem" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+
+    # ---------- Incidents ----------
+    IncidentStatus: { type: string, enum: [new, in_progress, on_hold, resolved, closed] }
+    IncidentChannel: { type: string, enum: [portal, email, auto] }
+
+    Incident:
+      type: object
+      required: [id, key, title, description, status, impact, urgency, priority, sla_policy_id, sla_due_at,
+                 sla_breached, reporter_id, assignee_id, team_id, ci_id, problem_id, channel, created_at, resolved_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        key: { type: string, example: INC-004512 }
+        title: { type: string }
+        description: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/IncidentStatus" }
+        impact: { $ref: "#/components/schemas/Level" }
+        urgency: { $ref: "#/components/schemas/Level" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        sla_policy_id: { type: [integer, "null"] }
+        sla_due_at: { $ref: "#/components/schemas/NullableDateTime" }
+        sla_breached: { type: boolean }
+        reporter_id: { $ref: "#/components/schemas/UUID" }
+        assignee_id: { $ref: "#/components/schemas/NullableUUID" }
+        team_id: { $ref: "#/components/schemas/NullableUUID" }
+        ci_id: { $ref: "#/components/schemas/NullableUUID" }
+        problem_id: { $ref: "#/components/schemas/NullableUUID" }
+        channel: { $ref: "#/components/schemas/IncidentChannel" }
+        created_at: { $ref: "#/components/schemas/DateTime" }
+        resolved_at: { $ref: "#/components/schemas/NullableDateTime" }
+
+    CreateIncidentRequest:
+      type: object
+      additionalProperties: false
+      required: [title, impact, urgency]
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        impact: { $ref: "#/components/schemas/Level" }
+        urgency: { $ref: "#/components/schemas/Level" }
+        ci_id: { $ref: "#/components/schemas/NullableUUID" }
+        team_id: { $ref: "#/components/schemas/NullableUUID", description: Solo agent y admin }
+        assignee_id: { $ref: "#/components/schemas/NullableUUID", description: Solo agent y admin }
+
+    UpdateIncidentRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        impact: { $ref: "#/components/schemas/Level" }
+        urgency: { $ref: "#/components/schemas/Level" }
+        ci_id: { $ref: "#/components/schemas/NullableUUID" }
+        team_id: { $ref: "#/components/schemas/NullableUUID" }
+        assignee_id: { $ref: "#/components/schemas/NullableUUID" }
+        problem_id: { $ref: "#/components/schemas/NullableUUID" }
+
+    UpdateIncidentStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { $ref: "#/components/schemas/IncidentStatus" }
+        comment: { type: string, minLength: 1, maxLength: 5000, description: Obligatorio al pasar a resolved }
+
+    IncidentComment:
+      type: object
+      required: [id, incident_id, author_id, body, internal, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        incident_id: { $ref: "#/components/schemas/UUID" }
+        author_id: { $ref: "#/components/schemas/UUID" }
+        body: { type: string }
+        internal: { type: boolean }
+        created_at: { $ref: "#/components/schemas/DateTime" }
+
+    CreateIncidentCommentRequest:
+      type: object
+      additionalProperties: false
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 5000 }
+        internal: { type: boolean, default: false }
+
+    IncidentPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Incident" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+
+    IncidentCommentPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/IncidentComment" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+
+    # ---------- Problems ----------
+    ProblemStatus: { type: string, enum: [new, investigating, known_error, resolved, closed] }
+
+    Problem:
+      type: object
+      required: [id, key, title, description, status, priority, root_cause, ci_id, owner_id, fix_change_id, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        key: { type: string, example: PRB-000045 }
+        title: { type: string }
+        description: { type: [string, "null"] }
+        status: { $ref: "#/components/schemas/ProblemStatus" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        root_cause: { type: [string, "null"] }
+        ci_id: { $ref: "#/components/schemas/NullableUUID" }
+        owner_id: { $ref: "#/components/schemas/NullableUUID" }
+        fix_change_id: { $ref: "#/components/schemas/NullableUUID" }
+        created_at: { $ref: "#/components/schemas/DateTime" }
+
+    KnownError:
+      type: object
+      required: [id, problem_id, symptom, workaround, published_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        problem_id: { $ref: "#/components/schemas/UUID" }
+        symptom: { type: string }
+        workaround: { type: string }
+        published_at: { $ref: "#/components/schemas/DateTime" }
+
+    ProblemDetail:
+      allOf:
+        - $ref: "#/components/schemas/Problem"
+        - type: object
+          required: [incident_ids, known_error]
+          properties:
+            incident_ids: { type: array, items: { $ref: "#/components/schemas/UUID" } }
+            known_error:
+              oneOf:
+                - $ref: "#/components/schemas/KnownError"
+                - type: "null"
+
+    CreateProblemRequest:
+      type: object
+      additionalProperties: false
+      required: [title, priority]
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        priority: { $ref: "#/components/schemas/Priority" }
+        ci_id: { $ref: "#/components/schemas/NullableUUID" }
+        owner_id: { $ref: "#/components/schemas/NullableUUID" }
+        incident_ids: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/UUID" } }
+
+    UpdateProblemRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        priority: { $ref: "#/components/schemas/Priority" }
+        root_cause: { type: [string, "null"], maxLength: 5000 }
+        ci_id: { $ref: "#/components/schemas/NullableUUID" }
+        owner_id: { $ref: "#/components/schemas/NullableUUID" }
+        fix_change_id: { $ref: "#/components/schemas/NullableUUID" }
+
+    UpdateProblemStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [investigating, resolved, closed] }
+
+    PublishKnownErrorRequest:
+      type: object
+      additionalProperties: false
+      required: [symptom, workaround]
+      properties:
+        symptom: { type: string, minLength: 3, maxLength: 5000 }
+        workaround: { type: string, minLength: 3, maxLength: 5000 }
+
+    LinkIncidentsRequest:
+      type: object
+      additionalProperties: false
+      required: [incident_ids]
+      properties:
+        incident_ids: { type: array, minItems: 1, maxItems: 50, items: { $ref: "#/components/schemas/UUID" } }
+
+    ProblemPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Problem" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+
+    # ---------- Changes ----------
+    ChangeType: { type: string, enum: [standard, normal, emergency] }
+    ChangeRisk: { type: string, enum: [low, medium, high] }
+    ChangeStatus: { type: string, enum: [draft, submitted, approved, rejected, scheduled, implemented, failed] }
+    ApprovalDecision: { type: string, enum: [pending, approved, rejected] }
+
+    Change:
+      type: object
+      required: [id, key, title, description, type, risk, status, rollback_plan, planned_start, planned_end,
+                 requester_id, problem_id, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        key: { type: string, example: CHG-000210 }
+        title: { type: string }
+        description: { type: [string, "null"] }
+        type: { $ref: "#/components/schemas/ChangeType" }
+        risk: { $ref: "#/components/schemas/ChangeRisk" }
+        status: { $ref: "#/components/schemas/ChangeStatus" }
+        rollback_plan: { type: [string, "null"] }
+        planned_start: { $ref: "#/components/schemas/NullableDateTime" }
+        planned_end: { $ref: "#/components/schemas/NullableDateTime" }
+        requester_id: { $ref: "#/components/schemas/UUID" }
+        problem_id: { $ref: "#/components/schemas/NullableUUID" }
+        created_at: { $ref: "#/components/schemas/DateTime" }
+
+    ChangeCI:
+      type: object
+      additionalProperties: false
+      required: [ci_id]
+      properties:
+        ci_id: { $ref: "#/components/schemas/UUID" }
+        new_version: { type: [string, "null"], maxLength: 50 }
+
+    ChangeApproval:
+      type: object
+      required: [id, change_id, approver_id, decision, comment, decided_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        change_id: { $ref: "#/components/schemas/UUID" }
+        approver_id: { $ref: "#/components/schemas/UUID" }
+        decision: { $ref: "#/components/schemas/ApprovalDecision" }
+        comment: { type: [string, "null"] }
+        decided_at: { $ref: "#/components/schemas/NullableDateTime" }
+
+    ChangeDetail:
+      allOf:
+        - $ref: "#/components/schemas/Change"
+        - type: object
+          required: [cis, approvals]
+          properties:
+            cis: { type: array, items: { $ref: "#/components/schemas/ChangeCI" } }
+            approvals: { type: array, items: { $ref: "#/components/schemas/ChangeApproval" } }
+
+    CreateChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [title, type, risk]
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        type: { $ref: "#/components/schemas/ChangeType" }
+        risk: { $ref: "#/components/schemas/ChangeRisk" }
+        rollback_plan: { type: [string, "null"], maxLength: 5000 }
+        planned_start: { $ref: "#/components/schemas/NullableDateTime" }
+        planned_end: { $ref: "#/components/schemas/NullableDateTime" }
+        problem_id: { $ref: "#/components/schemas/NullableUUID" }
+        cis: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/ChangeCI" } }
+
+    UpdateChangeRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        title: { type: string, minLength: 3, maxLength: 200 }
+        description: { type: [string, "null"], maxLength: 5000 }
+        type: { $ref: "#/components/schemas/ChangeType" }
+        risk: { $ref: "#/components/schemas/ChangeRisk" }
+        rollback_plan: { type: [string, "null"], maxLength: 5000 }
+        planned_start: { $ref: "#/components/schemas/NullableDateTime" }
+        planned_end: { $ref: "#/components/schemas/NullableDateTime" }
+        problem_id: { $ref: "#/components/schemas/NullableUUID" }
+        cis: { type: array, maxItems: 50, items: { $ref: "#/components/schemas/ChangeCI" } }
+
+    UpdateChangeStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [draft, submitted, scheduled, implemented, failed] }
+
+    ApproveChangeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        comment: { type: string, maxLength: 2000 }
+
+    RejectChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [comment]
+      properties:
+        comment: { type: string, minLength: 3, maxLength: 2000 }
+
+    ChangePage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/Change" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
+
+    # ---------- Requests ----------
+    ServiceRequestStatus: { type: string, enum: [submitted, pending_approval, approved, in_fulfillment, fulfilled, rejected] }
+
+    CatalogFormField:
+      type: object
+      required: [name, label, type, required]
+      properties:
+        name: { type: string, pattern: "^[a-z0-9_]+$" }
+        label: { type: string }
+        type: { type: string, enum: [text, textarea, number, date, select, boolean] }
+        required: { type: boolean }
+        options: { type: array, items: { type: string }, description: Solo para type = select }
+
+    CatalogItem:
+      type: object
+      required: [id, category_id, category_name, name, form_schema, needs_approval, sla_hours]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        category_id: { type: integer }
+        category_name: { type: string, description: Derivado (JOIN catalog_categories) }
+        name: { type: string }
+        form_schema:
+          type: object
+          required: [fields]
+          properties:
+            fields: { type: array, items: { $ref: "#/components/schemas/CatalogFormField" } }
+        needs_approval: { type: boolean }
+        sla_hours: { type: [integer, "null"] }
+
+    RequestApproval:
+      type: object
+      required: [id, request_id, approver_id, decision, decided_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        request_id: { $ref: "#/components/schemas/UUID" }
+        approver_id: { $ref: "#/components/schemas/UUID" }
+        decision: { $ref: "#/components/schemas/ApprovalDecision" }
+        decided_at: { $ref: "#/components/schemas/NullableDateTime" }
+
+    ServiceRequest:
+      type: object
+      required: [id, key, catalog_item_id, catalog_item_name, form_data, status, requester_id, assignee_id,
+                 created_at, fulfilled_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        key: { type: string, example: REQ-000987 }
+        catalog_item_id: { $ref: "#/components/schemas/UUID" }
+        catalog_item_name: { type: string, description: Derivado (JOIN catalog_items) }
+        form_data: { type: object, additionalProperties: true }
+        status: { $ref: "#/components/schemas/ServiceRequestStatus" }
+        requester_id: { $ref: "#/components/schemas/UUID" }
+        assignee_id: { $ref: "#/components/schemas/NullableUUID" }
+        created_at: { $ref: "#/components/schemas/DateTime" }
+        fulfilled_at: { $ref: "#/components/schemas/NullableDateTime" }
+
+    ServiceRequestDetail:
+      allOf:
+        - $ref: "#/components/schemas/ServiceRequest"
+        - type: object
+          required: [approvals]
+          properties:
+            approvals: { type: array, items: { $ref: "#/components/schemas/RequestApproval" } }
+
+    CreateServiceRequestRequest:
+      type: object
+      additionalProperties: false
+      required: [catalog_item_id, form_data]
+      properties:
+        catalog_item_id: { $ref: "#/components/schemas/UUID" }
+        form_data: { type: object, additionalProperties: true }
+
+    UpdateServiceRequestRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        assignee_id: { $ref: "#/components/schemas/NullableUUID", description: Solo agent y admin }
+        form_data: { type: object, additionalProperties: true, description: 'Solo el solicitante, antes de atenderse' }
+
+    UpdateServiceRequestStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [approved, rejected, in_fulfillment, fulfilled] }
+
+    ServiceRequestPage:
+      type: object
+      required: [data, meta]
+      properties:
+        data: { type: array, items: { $ref: "#/components/schemas/ServiceRequest" } }
+        meta: { $ref: "#/components/schemas/PaginationMeta" }
