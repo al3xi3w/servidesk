@@ -1,0 +1,68 @@
+# Identidad: login/JWT, usuarios, equipos, tenants, notificaciones
+# Responsable: José
+service: servidesk-identity
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  layers:
+    - ${param:commonLayerArn}
+  environment:
+    DB_HOST: ${param:dbHost}
+    DB_NAME: db_identity
+    DB_USER: servidesk_admin
+    DB_PASSWORD: ${env:DB_PASSWORD}
+    EVENTS_TOPIC_ARN: ${param:eventsTopicArn}
+    SERVICE_NAME: ms-identity
+    JWT_SECRET: ${env:JWT_SECRET}
+  httpApi:
+    cors: true
+    authorizers:
+      jwtAuthorizer:
+        type: request
+        functionArn: ${param:authorizerArn}
+        identitySource: $request.header.Authorization
+        enableSimpleResponses: true
+        payloadVersion: "2.0"
+        resultTtlInSeconds: 300
+
+package:
+  patterns:
+    - "!**"
+    - "handlers/**"
+    - "migrations/**"
+
+functions:
+  login:
+    handler: handlers/login.login
+    events:
+      - httpApi:
+          method: POST
+          path: /auth/login
+  listUsers:
+    handler: handlers/users.listUsers
+    events:
+      - httpApi:
+          method: GET
+          path: /users
+          authorizer:
+            name: jwtAuthorizer
+  migrate:
+    handler: handlers/migrate.handle   # se invoca a mano tras el deploy
+    timeout: 300
+
+resources:
+  Resources:
+    # El authorizer vive en el stack infra: API Gateway necesita permiso para invocarlo
+    AuthorizerInvokePermission:
+      Type: AWS::Lambda::Permission
+      Properties:
+        Action: lambda:InvokeFunction
+        FunctionName: ${param:authorizerArn}
+        Principal: apigateway.amazonaws.com
+        SourceArn: !Join ["", ["arn:aws:execute-api:", !Ref AWS::Region, ":", !Ref AWS::AccountId, ":", !Ref HttpApi, "/*"]]

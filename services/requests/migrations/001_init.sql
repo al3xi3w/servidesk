@@ -1,0 +1,2 @@
+-- Tablas de ms-requests (ver diagrama ER en el documento de diseño).
+-- Se ejecuta dentro de cada schema tenant_*.

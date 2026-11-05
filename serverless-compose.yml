@@ -1,0 +1,64 @@
+# Despliega todo con: npm run deploy   (Serverless Framework v3 + @serverless/compose)
+services:
+  infra:
+    path: infra
+
+  identity:
+    path: services/identity
+    params:
+      dbHost: ${infra.DbHost}
+      eventsTopicArn: ${infra.EventsTopicArn}
+      authorizerArn: ${infra.AuthorizerArn}
+      commonLayerArn: ${infra.CommonLayerArn}
+      attachmentsBucket: ${infra.AttachmentsBucketName}
+      exportsBucket: ${infra.ExportsBucketName}
+
+  cmdb:
+    path: services/cmdb
+    params:
+      dbHost: ${infra.DbHost}
+      eventsTopicArn: ${infra.EventsTopicArn}
+      authorizerArn: ${infra.AuthorizerArn}
+      commonLayerArn: ${infra.CommonLayerArn}
+      attachmentsBucket: ${infra.AttachmentsBucketName}
+      exportsBucket: ${infra.ExportsBucketName}
+
+  incidents:
+    path: services/incidents
+    params:
+      dbHost: ${infra.DbHost}
+      eventsTopicArn: ${infra.EventsTopicArn}
+      authorizerArn: ${infra.AuthorizerArn}
+      commonLayerArn: ${infra.CommonLayerArn}
+      attachmentsBucket: ${infra.AttachmentsBucketName}
+      exportsBucket: ${infra.ExportsBucketName}
+
+  problems:
+    path: services/problems
+    params:
+      dbHost: ${infra.DbHost}
+      eventsTopicArn: ${infra.EventsTopicArn}
+      authorizerArn: ${infra.AuthorizerArn}
+      commonLayerArn: ${infra.CommonLayerArn}
+      attachmentsBucket: ${infra.AttachmentsBucketName}
+      exportsBucket: ${infra.ExportsBucketName}
+
+  changes:
+    path: services/changes
+    params:
+      dbHost: ${infra.DbHost}
+      eventsTopicArn: ${infra.EventsTopicArn}
+      authorizerArn: ${infra.AuthorizerArn}
+      commonLayerArn: ${infra.CommonLayerArn}
+      attachmentsBucket: ${infra.AttachmentsBucketName}
+      exportsBucket: ${infra.ExportsBucketName}
+
+  requests:
+    path: services/requests
+    params:
+      dbHost: ${infra.DbHost}
+      eventsTopicArn: ${infra.EventsTopicArn}
+      authorizerArn: ${infra.AuthorizerArn}
+      commonLayerArn: ${infra.CommonLayerArn}
+      attachmentsBucket: ${infra.AttachmentsBucketName}
+      exportsBucket: ${infra.ExportsBucketName}

@@ -1,0 +1,108 @@
+# Stack compartido: RDS, SNS, S3, layer común y Lambda Authorizer.
+# Responsable: Vannia (infra) + José (código del authorizer)
+service: servidesk-infra
+frameworkVersion: "3"
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole   # AWS Academy: no se pueden crear roles
+  environment:
+    JWT_SECRET: ${env:JWT_SECRET}
+
+package:
+  individually: true
+  patterns:
+    - "!**"
+
+layers:
+  common:
+    path: layers/common
+    compatibleRuntimes: [python3.12]
+    description: pg8000, PyJWT y utilidades comunes (db, auth, events)
+
+functions:
+  authorizer:
+    handler: authorizer/handler.handle
+    layers:
+      - { Ref: CommonLambdaLayer }
+    package:
+      patterns:
+        - "authorizer/**"
+
+resources:
+  Resources:
+    # ---------- Eventos ----------
+    EventsTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: servidesk-itsm-events-${self:provider.stage}
+
+    # ---------- S3 ----------
+    AttachmentsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: servidesk-attachments-${self:provider.stage}-${aws:accountId}
+        CorsConfiguration:
+          CorsRules:
+            - AllowedMethods: [GET, PUT]
+              AllowedOrigins: ["*"]
+              AllowedHeaders: ["*"]
+    ExportsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: servidesk-exports-${self:provider.stage}-${aws:accountId}
+        LifecycleConfiguration:
+          Rules:
+            - Id: borrar-en-7-dias
+              Status: Enabled
+              ExpirationInDays: 7
+    SeedBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: servidesk-seed-${self:provider.stage}-${aws:accountId}
+
+    # ---------- RDS PostgreSQL (una sola instancia) ----------
+    DbSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Acceso a PostgreSQL (solo laboratorio)
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: 5432
+            ToPort: 5432
+            CidrIp: 0.0.0.0/0
+    Database:
+      Type: AWS::RDS::DBInstance
+      DeletionPolicy: Delete
+      Properties:
+        DBInstanceIdentifier: servidesk-${self:provider.stage}
+        Engine: postgres
+        EngineVersion: "16"
+        DBInstanceClass: db.t3.micro
+        AllocatedStorage: "20"
+        MasterUsername: servidesk_admin
+        MasterUserPassword: ${env:DB_PASSWORD}
+        PubliclyAccessible: true
+        BackupRetentionPeriod: 0
+        VPCSecurityGroups:
+          - !GetAtt DbSecurityGroup.GroupId
+
+  Outputs:
+    DbHost:
+      Value: !GetAtt Database.Endpoint.Address
+    EventsTopicArn:
+      Value: !Ref EventsTopic
+    AuthorizerArn:
+      Value: !GetAtt AuthorizerLambdaFunction.Arn
+    CommonLayerArn:
+      Value: !Ref CommonLambdaLayer
+    AttachmentsBucketName:
+      Value: !Ref AttachmentsBucket
+    ExportsBucketName:
+      Value: !Ref ExportsBucket
+    SeedBucketName:
+      Value: !Ref SeedBucket

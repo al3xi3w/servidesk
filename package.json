@@ -1,0 +1,13 @@
+{
+  "name": "servidesk",
+  "private": true,
+  "scripts": {
+    "layer": "pip install -r infra/layers/common/requirements.txt -t infra/layers/common/python --upgrade",
+    "deploy": "npm run layer && serverless deploy",
+    "remove": "serverless remove"
+  },
+  "devDependencies": {
+    "@serverless/compose": "^1.3.0",
+    "serverless": "^3.39.0"
+  }
+}

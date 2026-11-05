@@ -1,0 +1,12 @@
+node_modules/
+.serverless/
+__pycache__/
+*.pyc
+.env
+.venv/
+dist/
+# dependencias instaladas en el layer (se generan con npm run layer)
+infra/layers/common/python/*
+!infra/layers/common/python/common/
+seed/out/
+.DS_Store
