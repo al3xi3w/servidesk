@@ -596,3 +596,30 @@ export interface EventEnvelope<TData = Record<string, unknown>> {
   source: string;
   data: TData;
 }
+
+// ---------------------------------------------------------------- Notificaciones (PROPUESTO v1.0, fuera de v0.9 por D16)
+// Tabla notifications de ms-identity (ER del diseño). Rutas propuestas: GET /notifications, POST /notifications/read.
+// Hasta que se aprueben en openapi.yaml, solo las responde el simulador de src/mocks.
+
+export interface Notification {
+  id: UUID;
+  user_id: UUID;
+  event_type: EventType;
+  title: string;
+  body: string;
+  read: boolean;
+  created_at: ISODateTime;
+  /** Propuesto: recurso relacionado para navegar desde la campana. */
+  resource_type: 'incident' | 'problem' | 'change' | 'request' | 'ci' | null;
+  resource_id: UUID | null;
+}
+
+export interface NotificationListResponse {
+  data: Notification[];
+  meta: { unread: number };
+}
+
+export interface MarkNotificationsReadRequest {
+  /** Sin ids = marcar todas. */
+  ids?: UUID[];
+}

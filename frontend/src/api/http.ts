@@ -13,6 +13,7 @@ import type {
   JwtPayload,
   NormalizedApiError,
 } from '../types/api';
+import { mockAdapter, shouldMock } from '../mocks/adapter';
 
 // ------------------------------------------------------------------ Token (sessionStorage, decisión D11)
 
@@ -168,6 +169,9 @@ function createClient(service: ServiceName): AxiosInstance {
     paramsSerializer: { serialize: (p) => serializeParams(p as Record<string, unknown>) },
   });
 
+  // Modo demo: si el servicio no tiene URL (o VITE_USE_MOCKS=true) responde el simulador de src/mocks.
+  if (shouldMock(BASE_URLS[service])) client.defaults.adapter = mockAdapter(service);
+
   client.interceptors.request.use((config) => {
     const token = tokenStorage.get();
     if (token) config.headers.set('Authorization', `Bearer ${token}`);
@@ -188,6 +192,9 @@ function createClient(service: ServiceName): AxiosInstance {
 
   return client;
 }
+
+/** Servicios que se están simulando (para mostrar el aviso de modo demo). */
+export const MOCKED_SERVICES: ServiceName[] = (Object.keys(BASE_URLS) as ServiceName[]).filter((s) => shouldMock(BASE_URLS[s]));
 
 export const api: Record<ServiceName, AxiosInstance> = {
   identity: createClient('identity'),
