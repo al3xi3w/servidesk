@@ -1,0 +1,21 @@
+# AWS Amplify Hosting (monorepo): el frontend vive en frontend/.
+# En la consola de Amplify: App settings → Environment variables → VITE_API_*_URL (ver frontend/.env.example).
+# Rewrites (SPA): source "</^[^.]+$|\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>", target "/index.html", type 200.
+version: 1
+applications:
+  - appRoot: frontend
+    frontend:
+      phases:
+        preBuild:
+          commands:
+            - npm ci
+        build:
+          commands:
+            - npm run build
+      artifacts:
+        baseDirectory: dist
+        files:
+          - '**/*'
+      cache:
+        paths:
+          - node_modules/**/*
