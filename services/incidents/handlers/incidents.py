@@ -1,16 +1,699 @@
 """Handlers HTTP de ms-incidents."""
-from common.http import ok, error, tenant_ctx
+
+import json
+import uuid
+from datetime import datetime, timezone
+
+from common.http import ok, tenant_ctx
 from common.db import tenant_conn
+from common.events import publish
+
+
+# Matriz D6: prioridad según impacto y urgencia
+PRIORITY_MATRIX = {
+    "high": {
+        "high": "P1",
+        "medium": "P2",
+        "low": "P3",
+    },
+    "medium": {
+        "high": "P2",
+        "medium": "P3",
+        "low": "P4",
+    },
+    "low": {
+        "high": "P3",
+        "medium": "P4",
+        "low": "P4",
+    },
+}
+
+LEVELS = {"high", "medium", "low"}
+
+ALLOWED_FIELDS = {
+    "title",
+    "description",
+    "impact",
+    "urgency",
+    "ci_id",
+    "team_id",
+    "assignee_id",
+}
+
+
+def api_error(code, message, status=400, details=None, context=None):
+    """Devuelve errores siguiendo API_CONTRACTS.md."""
+    result = {
+        "code": code,
+        "message": message,
+    }
+
+    if details:
+        result["details"] = details
+
+    request_id = getattr(context, "aws_request_id", None)
+    if request_id:
+        result["request_id"] = request_id
+
+    return ok({"error": result}, status)
+
+
+def serialize_incident(incident):
+    """Convierte UUID y fechas al formato JSON del contrato."""
+    result = {}
+
+    for key, value in incident.items():
+        if isinstance(value, uuid.UUID):
+            result[key] = str(value)
+
+        elif isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+
+            result[key] = (
+                value.astimezone(timezone.utc)
+                .isoformat(timespec="microseconds")
+                .replace("+00:00", "Z")
+            )
+
+        else:
+            result[key] = value
+
+    return result
+
 
 
 def listIncidents(event, context):
     ctx = tenant_ctx(event)
+    role = ctx["role"]
+    user_id = ctx["user_id"]
+
+    if role not in ("admin", "agent", "customer"):
+        return api_error(
+            "FORBIDDEN",
+            "No tienes permiso para consultar incidentes",
+            403,
+            context=context,
+        )
+
+    query = event.get("queryStringParameters") or {}
+
+    # 1. Paginación
+    try:
+        page = int(query.get("page", "1"))
+        limit = int(query.get("limit", "20"))
+    except (ValueError, TypeError):
+        return api_error(
+            "VALIDATION_ERROR",
+            "page y limit deben ser enteros",
+            400,
+            context=context,
+        )
+
+    if page < 1 or not 1 <= limit <= 100:
+        return api_error(
+            "VALIDATION_ERROR",
+            "page debe ser >= 1 y limit entre 1 y 100",
+            400,
+            context=context,
+        )
+
+    # 2. Ordenamiento
+    allowed_sort = {
+        "created_at", "priority", "sla_due_at",
+        "status", "key",
+    }
+
+    sort_by = query.get("sort_by", "created_at")
+    sort_order = query.get("sort_order", "desc")
+
+    if sort_by not in allowed_sort:
+        return api_error(
+            "VALIDATION_ERROR",
+            "sort_by inválido",
+            400,
+            context=context,
+        )
+
+    if sort_order not in ("asc", "desc"):
+        return api_error(
+            "VALIDATION_ERROR",
+            "sort_order inválido",
+            400,
+            context=context,
+        )
+
+    conditions = []
+    params = {}
+
+    # 3. Seguridad para customers
+    if role == "customer":
+        conditions.append("reporter_id = :reporter_id")
+        params["reporter_id"] = user_id
+
+    # 4. Filtros de valores enumerados
+    enum_filters = {
+        "status": {
+            "new", "in_progress", "on_hold",
+            "resolved", "closed",
+        },
+        "priority": {"P1", "P2", "P3", "P4"},
+        "impact": {"high", "medium", "low"},
+        "urgency": {"high", "medium", "low"},
+        "channel": {"portal", "email", "auto"},
+    }
+
+    for field, allowed_values in enum_filters.items():
+        value = query.get(field)
+
+        if value is None:
+            continue
+
+        values = value.split(",")
+
+        if any(v not in allowed_values for v in values):
+            return api_error(
+                "VALIDATION_ERROR",
+                f"Filtro inválido: {field}",
+                400,
+                context=context,
+            )
+
+        placeholders = []
+
+        for index, value in enumerate(values):
+            param_name = f"{field}_{index}"
+            placeholders.append(f":{param_name}")
+            params[param_name] = value
+
+        conditions.append(
+            f"{field} IN ({', '.join(placeholders)})"
+        )
+
+    # 5. Filtros UUID
+    for field in ("team_id", "ci_id", "problem_id"):
+        value = query.get(field)
+
+        if value is None:
+            continue
+
+        try:
+            params[field] = str(uuid.UUID(value))
+        except (ValueError, TypeError, AttributeError):
+            return api_error(
+                "VALIDATION_ERROR",
+                f"UUID inválido: {field}",
+                400,
+                context=context,
+            )
+
+        conditions.append(f"{field} = :{field}")
+
+    # 6. Colas de agentes
+    assignee = query.get("assignee_id")
+
+    if assignee == "none":
+        conditions.append("assignee_id IS NULL")
+
+    elif assignee == "me":
+        conditions.append("assignee_id = :assignee_id")
+        params["assignee_id"] = user_id
+
+    elif assignee is not None:
+        try:
+            params["assignee_id"] = str(uuid.UUID(assignee))
+        except (ValueError, TypeError, AttributeError):
+            return api_error(
+                "VALIDATION_ERROR",
+                "assignee_id inválido",
+                400,
+                context=context,
+            )
+
+        conditions.append("assignee_id = :assignee_id")
+
+    # 7. Filtro de SLA incumplido
+    sla_breached = query.get("sla_breached")
+
+    if sla_breached is not None:
+        if sla_breached not in ("true", "false"):
+            return api_error(
+                "VALIDATION_ERROR",
+                "sla_breached debe ser true o false",
+                400,
+                context=context,
+            )
+
+        conditions.append(
+            "sla_breached = :sla_breached"
+        )
+        params["sla_breached"] = (
+            sla_breached == "true"
+        )
+
+    # 8. Búsqueda por clave o título
+    search = query.get("search")
+
+    if search is not None:
+        if not 2 <= len(search) <= 100:
+            return api_error(
+                "VALIDATION_ERROR",
+                "search debe tener entre 2 y 100 caracteres",
+                400,
+                context=context,
+            )
+
+        conditions.append(
+            "(key ILIKE :search OR title ILIKE :search)"
+        )
+        params["search"] = f"%{search}%"
+
+    # 9. Construcción de las consultas
+    where_sql = (
+        " WHERE " + " AND ".join(conditions)
+        if conditions else ""
+    )
+
     conn = tenant_conn(ctx["schema"])
-    rows = conn.run("SELECT * FROM incidents ORDER BY created_at DESC LIMIT 50")
+
+    # Contar todos los registros que cumplen los filtros
+    count_rows = conn.run(
+        "SELECT COUNT(*) FROM incidents" + where_sql,
+        **params,
+    )
+
+    total = count_rows[0][0]
+
+    # Obtener únicamente la página solicitada
+    offset = (page - 1) * limit
+
+    sql = (
+        "SELECT * FROM incidents"
+        + where_sql
+        + f" ORDER BY {sort_by} {sort_order.upper()}, id ASC"
+        + " LIMIT :limit OFFSET :offset"
+    )
+
+    rows = conn.run(
+        sql,
+        **params,
+        limit=limit,
+        offset=offset,
+    )
+
     cols = [c["name"] for c in conn.columns]
-    return ok([dict(zip(cols, r)) for r in rows])
+
+    data = [
+        serialize_incident(dict(zip(cols, row)))
+        for row in rows
+    ]
+
+    # 10. Formato IN-01
+    return ok({
+        "data": data,
+        "meta": {
+            "page": page,
+            "limit": limit,
+            "total": total,
+            "total_pages": (
+                (total + limit - 1) // limit
+            ),
+        },
+    })
+
 
 
 def createIncident(event, context):
-    # TODO: insertar en el schema del tenant y publicar IncidentCreated
-    return error("no implementado", 501)
+    # 1. Obtener el contexto del usuario autenticado
+    ctx = tenant_ctx(event)
+
+    role = ctx["role"]
+    tenant_id = ctx["tenant_id"]
+
+    if role not in ("admin", "agent", "customer"):
+        return api_error(
+            "FORBIDDEN",
+            "No tienes permiso para crear incidentes",
+            403,
+            context=context,
+        )
+
+    # 2. Leer el JSON recibido
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return api_error(
+            "VALIDATION_ERROR",
+            "JSON inválido",
+            400,
+            context=context,
+        )
+
+    if not isinstance(body, dict):
+        return api_error(
+            "VALIDATION_ERROR",
+            "El body debe ser un objeto JSON",
+            400,
+            context=context,
+        )
+
+    # 3. Validar campos según IN-02
+    details = []
+
+    for field in body:
+        if field not in ALLOWED_FIELDS:
+            details.append({
+                "field": field,
+                "issue": "Campo no permitido",
+            })
+
+    title = body.get("title")
+
+    if (
+        not isinstance(title, str)
+        or not 3 <= len(title.strip()) <= 200
+    ):
+        details.append({
+            "field": "title",
+            "issue": "Debe tener entre 3 y 200 caracteres",
+        })
+
+    description = body.get("description")
+
+    if description is not None:
+        if (
+            not isinstance(description, str)
+            or len(description) > 5000
+        ):
+            details.append({
+                "field": "description",
+                "issue": "Debe ser texto de máximo 5000 caracteres",
+            })
+
+    impact = body.get("impact")
+    urgency = body.get("urgency")
+
+    if not isinstance(impact, str) or impact not in LEVELS:
+        details.append({
+            "field": "impact",
+            "issue": "Debe ser high, medium o low",
+        })
+
+    if not isinstance(urgency, str) or urgency not in LEVELS:
+        details.append({
+            "field": "urgency",
+            "issue": "Debe ser high, medium o low",
+        })
+
+    # 4. Validar UUID opcionales
+    optional_ids = {}
+
+    for field in ("ci_id", "team_id", "assignee_id"):
+        value = body.get(field)
+
+        if value is None:
+            optional_ids[field] = None
+            continue
+
+        try:
+            if not isinstance(value, str):
+                raise ValueError("UUID inválido")
+
+            optional_ids[field] = str(uuid.UUID(value))
+
+        except (ValueError, AttributeError):
+            details.append({
+                "field": field,
+                "issue": "Debe ser un UUID válido",
+            })
+
+    # 5. Restricciones para customer
+    if role == "customer":
+        for field in ("team_id", "assignee_id"):
+            if field in body:
+                details.append({
+                    "field": field,
+                    "issue": "No permitido para customer",
+                })
+
+    if details:
+        return api_error(
+            "VALIDATION_ERROR",
+            "La solicitud tiene campos inválidos",
+            400,
+            details=details,
+            context=context,
+        )
+
+    # 6. Obtener reporter_id del authorizer
+    try:
+        reporter_id = str(uuid.UUID(ctx["user_id"]))
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return api_error(
+            "INTERNAL_ERROR",
+            "Contexto de usuario inválido",
+            500,
+            context=context,
+        )
+
+    # 7. Calcular prioridad con matriz D6
+    priority = PRIORITY_MATRIX[impact][urgency]
+
+    # 8. Conectarse al schema del tenant
+    conn = tenant_conn(ctx["schema"])
+
+    # 9. Buscar la política SLA correspondiente
+    policies = conn.run(
+        """
+        SELECT id, resolution_minutes
+        FROM sla_policies
+        WHERE priority = :priority
+        ORDER BY id
+        LIMIT 1
+        """,
+        priority=priority,
+    )
+
+    if not policies:
+        return api_error(
+            "INTERNAL_ERROR",
+            "No existe una política SLA para la prioridad",
+            500,
+            context=context,
+        )
+
+    sla_policy_id = policies[0][0]
+    resolution_minutes = policies[0][1]
+
+    # 10. Crear incidente dentro de una transacción
+    transaction_started = False
+
+    try:
+        conn.run("BEGIN")
+        transaction_started = True
+
+        # Evitar que dos creaciones simultáneas generen
+        # la misma clave dentro del tenant.
+        conn.run(
+            """
+            SELECT pg_advisory_xact_lock(
+                hashtext(current_schema() || ':incident_key')
+            )
+            """
+        )
+
+        # Obtener el último número de incidente
+        rows = conn.run(
+            """
+            SELECT COALESCE(
+                MAX(SUBSTRING(key FROM 5)::integer),
+                0
+            )
+            FROM incidents
+            WHERE key ~ '^INC-[0-9]{6}$'
+            """
+        )
+
+        next_number = rows[0][0] + 1
+
+        if next_number > 999999:
+            raise RuntimeError(
+                "Se agotó el rango de claves de incidentes"
+            )
+
+        incident_key = f"INC-{next_number:06d}"
+
+        # 11. Insertar incidente y calcular SLA
+        rows = conn.run(
+            """
+            INSERT INTO incidents (
+                key,
+                title,
+                description,
+                status,
+                impact,
+                urgency,
+                priority,
+                sla_policy_id,
+                sla_due_at,
+                sla_breached,
+                reporter_id,
+                assignee_id,
+                team_id,
+                ci_id,
+                channel,
+                created_at
+            )
+            VALUES (
+                :key,
+                :title,
+                :description,
+                'new',
+                :impact,
+                :urgency,
+                :priority,
+                :sla_policy_id,
+                (
+                    CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+                    + :resolution_minutes * INTERVAL '1 minute'
+                ),
+                FALSE,
+                :reporter_id,
+                :assignee_id,
+                :team_id,
+                :ci_id,
+                'portal',
+                CURRENT_TIMESTAMP AT TIME ZONE 'UTC'
+            )
+            RETURNING *
+            """,
+            key=incident_key,
+            title=title.strip(),
+            description=description,
+            impact=impact,
+            urgency=urgency,
+            priority=priority,
+            sla_policy_id=sla_policy_id,
+            resolution_minutes=resolution_minutes,
+            reporter_id=reporter_id,
+            assignee_id=optional_ids["assignee_id"],
+            team_id=optional_ids["team_id"],
+            ci_id=optional_ids["ci_id"],
+        )
+
+        cols = [c["name"] for c in conn.columns]
+        incident = dict(zip(cols, rows[0]))
+
+        conn.run("COMMIT")
+        transaction_started = False
+
+    except Exception:
+        if transaction_started:
+            conn.run("ROLLBACK")
+        raise
+
+    # 12. Publicar IncidentCreated usando el helper común
+    publish(
+        event_type="IncidentCreated",
+        tenant_id=tenant_id,
+        data={
+            "incidentId": str(incident["id"]),
+            "key": incident["key"],
+            "title": incident["title"],
+            "priority": incident["priority"],
+            "ciId": (
+                str(incident["ci_id"])
+                if incident["ci_id"] else None
+            ),
+            "teamId": (
+                str(incident["team_id"])
+                if incident["team_id"] else None
+            ),
+            "assigneeId": (
+                str(incident["assignee_id"])
+                if incident["assignee_id"] else None
+            ),
+            "reporterId": str(incident["reporter_id"]),
+            "channel": incident["channel"],
+            "actorId": reporter_id,
+        },
+        source="ms-incidents",
+    )
+
+    # 13. Responder con el contrato oficial
+    return ok({
+        "data": serialize_incident(incident)
+    }, 201)
+
+
+def getIncident(event, context):
+    """IN-03: GET /incidents/{id}."""
+
+    # 1. Obtener tenant y usuario autenticado
+    ctx = tenant_ctx(event)
+
+    role = ctx["role"]
+    user_id = ctx["user_id"]
+
+    # 2. Comprobar permisos
+    if role not in ("admin", "agent", "customer"):
+        return api_error(
+            "FORBIDDEN",
+            "No tienes permiso para consultar incidentes",
+            403,
+            context=context,
+        )
+
+    # 3. Obtener ID de la ruta
+    path_params = event.get("pathParameters") or {}
+    incident_id = path_params.get("id")
+
+    # 4. Validar que sea UUID
+    try:
+        incident_id = str(uuid.UUID(incident_id))
+    except (ValueError, TypeError, AttributeError):
+        return api_error(
+            "VALIDATION_ERROR",
+            "El ID del incidente debe ser un UUID válido",
+            400,
+            context=context,
+        )
+
+    # 5. Conectar al schema del tenant
+    conn = tenant_conn(ctx["schema"])
+
+    # 6. Construir consulta según el rol
+    params = {"incident_id": incident_id}
+
+    sql = """
+        SELECT *
+        FROM incidents
+        WHERE id = :incident_id
+    """
+
+    # Customer solo puede consultar incidentes propios
+    if role == "customer":
+        sql += " AND reporter_id = :reporter_id"
+        params["reporter_id"] = user_id
+
+    # 7. Consultar incidente
+    rows = conn.run(sql, **params)
+
+    # 8. Incidente inexistente o sin acceso
+    if not rows:
+        return api_error(
+            "NOT_FOUND",
+            "Incidente no encontrado",
+            404,
+            context=context,
+        )
+
+    # 9. Convertir resultado PostgreSQL a diccionario
+    cols = [column["name"] for column in conn.columns]
+
+    incident = dict(zip(cols, rows[0]))
+
+    # 10. Responder con el contrato IN-03
+    return ok({
+        "data": serialize_incident(incident)
+    })
