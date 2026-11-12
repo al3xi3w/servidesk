@@ -816,3 +816,785 @@ class TestIncidents(unittest.TestCase):
         self.assertEqual(response["statusCode"], 403)
 
         self.mock_db.assert_not_called()
+
+    # ==========================================
+    # IN-04: PATCH /incidents/{id}
+    # ==========================================
+
+    def preparar_actualizacion(self, encontrado=True, cerrado=False,
+                               sla_configurado=True):
+        """Simular PostgreSQL para actualizar incidentes."""
+
+        self.event["pathParameters"] = {
+            "id": self.incident_id
+        }
+
+        self.event["body"] = json.dumps({
+            "title": "Servidor actualizado"
+        })
+
+        # Copia para no modificar el incidente original
+        current = dict(self.incident)
+
+        if cerrado:
+            current["status"] = "closed"
+
+        self.mock_conn.columns = [
+            {"name": name}
+            for name in current.keys()
+        ]
+
+        def fake_update_run(sql, **params):
+            query = sql.strip()
+
+            if query in ("BEGIN", "COMMIT", "ROLLBACK"):
+                return []
+
+            if "SELECT *" in query and "FOR UPDATE" in query:
+                if encontrado:
+                    return [tuple(current.values())]
+                return []
+
+            if "FROM sla_policies" in query:
+                if not sla_configurado:
+                    return []
+
+                # Tiempo ficticio exclusivamente para tests
+                return [(2, 180)]
+
+            if query.startswith("UPDATE incidents SET"):
+                # Simular cambios realizados por PostgreSQL
+                for field, value in params.items():
+                    if field in current:
+                        current[field] = value
+
+                return [tuple(current.values())]
+
+            raise AssertionError(
+                f"Consulta SQL inesperada: {query}"
+            )
+
+        self.mock_conn.run.side_effect = fake_update_run
+
+    def consultas_update(self):
+        """Obtener las consultas UPDATE ejecutadas."""
+        return [
+            call
+            for call in self.mock_conn.run.call_args_list
+            if call.args[0].strip().startswith(
+                "UPDATE incidents SET"
+            )
+        ]
+
+    # TEST 28: Actualización correcta
+    def test_actualizar_incidente(self):
+        self.preparar_actualizacion()
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        body = json.loads(response["body"])
+
+        self.assertEqual(
+            body["data"]["title"],
+            "Servidor actualizado",
+        )
+
+        self.mock_db.assert_called_once_with(
+            "tenant_andina"
+        )
+
+        self.assertEqual(len(self.consultas_update()), 1)
+
+    # TEST 29: Recalcular prioridad y SLA
+    def test_actualizar_prioridad_y_sla(self):
+        self.preparar_actualizacion()
+
+        self.event["body"] = json.dumps({
+            "urgency": "medium"
+        })
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        # high + medium = P2
+        body = json.loads(response["body"])
+
+        self.assertEqual(
+            body["data"]["priority"],
+            "P2",
+        )
+
+        sla_queries = [
+            call
+            for call in self.mock_conn.run.call_args_list
+            if "FROM sla_policies" in call.args[0]
+        ]
+
+        self.assertEqual(len(sla_queries), 1)
+
+        self.assertEqual(
+            sla_queries[0].kwargs["priority"],
+            "P2",
+        )
+
+        updates = self.consultas_update()
+
+        self.assertEqual(
+            updates[0].kwargs["sla_policy_id"],
+            2,
+        )
+
+        self.assertEqual(
+            updates[0].kwargs["resolution_minutes"],
+            180,
+        )
+
+        self.assertIn(
+            "sla_due_at",
+            updates[0].args[0],
+        )
+
+    # TEST 30: No recalcular SLA si no cambia prioridad
+    def test_actualizar_sin_cambiar_impacto_urgencia(self):
+        self.preparar_actualizacion()
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        sla_queries = [
+            call
+            for call in self.mock_conn.run.call_args_list
+            if "FROM sla_policies" in call.args[0]
+        ]
+
+        self.assertEqual(len(sla_queries), 0)
+
+        updates = self.consultas_update()
+
+        self.assertNotIn(
+            "sla_due_at",
+            updates[0].args[0],
+        )
+
+    # TEST 31: Permitir desasignar agente
+    def test_actualizar_assignee_null(self):
+        self.preparar_actualizacion()
+
+        self.event["body"] = json.dumps({
+            "assignee_id": None
+        })
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        updates = self.consultas_update()
+
+        self.assertIsNone(
+            updates[0].kwargs["assignee_id"]
+        )
+
+    # TEST 32: Customer no puede actualizar
+    def test_actualizar_customer_prohibido(self):
+        self.preparar_actualizacion()
+
+        self.event["requestContext"]["authorizer"][
+            "lambda"
+        ]["role"] = "customer"
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 403)
+
+        self.mock_db.assert_not_called()
+        self.mock_publish.assert_not_called()
+
+    # TEST 33: UUID inválido
+    def test_actualizar_uuid_invalido(self):
+        self.preparar_actualizacion()
+
+        self.event["pathParameters"] = {
+            "id": "INC-000001"
+        }
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+
+        self.mock_db.assert_not_called()
+
+    # TEST 34: Campos no permitidos
+    def test_actualizar_campos_prohibidos(self):
+        self.preparar_actualizacion()
+
+        self.event["body"] = json.dumps({
+            "priority": "P1"
+        })
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+
+        self.mock_db.assert_not_called()
+
+    # TEST 35: Incidente cerrado
+    def test_actualizar_incidente_cerrado(self):
+        self.preparar_actualizacion(cerrado=True)
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 409)
+
+        self.assertEqual(
+            len(self.consultas_update()),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 36: Incidente inexistente
+    def test_actualizar_incidente_no_existe(self):
+        self.preparar_actualizacion(encontrado=False)
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 404)
+
+        self.assertEqual(
+            len(self.consultas_update()),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 37: SLA no configurado
+    def test_actualizar_sla_no_configurado(self):
+        self.preparar_actualizacion(
+            sla_configurado=False
+        )
+
+        self.event["body"] = json.dumps({
+            "urgency": "medium"
+        })
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 500)
+
+        self.assertEqual(
+            len(self.consultas_update()),
+            0,
+        )
+
+        rollbacks = [
+            call
+            for call in self.mock_conn.run.call_args_list
+            if call.args[0].strip() == "ROLLBACK"
+        ]
+
+        self.assertEqual(len(rollbacks), 1)
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 38: Publicar IncidentUpdated
+    def test_actualizar_publicar_evento(self):
+        self.preparar_actualizacion()
+
+        response = incidents.updateIncident(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        self.mock_publish.assert_called_once()
+
+        params = self.mock_publish.call_args.kwargs
+
+        self.assertEqual(
+            params["event_type"],
+            "IncidentUpdated",
+        )
+
+        self.assertEqual(
+            params["tenant_id"],
+            "andina",
+        )
+
+        self.assertEqual(
+            params["data"]["incidentId"],
+            self.incident_id,
+        )
+
+        self.assertEqual(
+            params["data"]["actorId"],
+            self.reporter_id,
+        )
+
+        # SNS debe publicarse después del COMMIT
+        commits = [
+            call
+            for call in self.mock_conn.run.call_args_list
+            if call.args[0].strip() == "COMMIT"
+        ]
+
+        self.assertEqual(len(commits), 1)
+
+
+    # ==========================================
+    # IN-05: PUT /incidents/{id}/status
+    # ==========================================
+
+    def preparar_cambio_estado(
+        self,
+        estado_actual="new",
+        encontrado=True,
+        error_historial=False,
+    ):
+        """Simular PostgreSQL para cambios de estado."""
+
+        self.event["pathParameters"] = {
+            "id": self.incident_id
+        }
+
+        self.event["body"] = json.dumps({
+            "status": "in_progress"
+        })
+
+        current = dict(self.incident)
+        current["status"] = estado_actual
+
+        self.mock_conn.columns = [
+            {"name": name}
+            for name in current
+        ]
+
+        def fake_status_run(sql, **params):
+            query = sql.strip()
+
+            if query in ("BEGIN", "COMMIT", "ROLLBACK"):
+                return []
+
+            if (
+                query.startswith("SELECT *")
+                and "FROM incidents" in query
+                and "FOR UPDATE" in query
+            ):
+                if not encontrado:
+                    return []
+                return [tuple(current.values())]
+
+            if query.startswith("UPDATE incidents"):
+                current["status"] = params["new_status"]
+
+                if params["new_status"] == "resolved":
+                    current["resolved_at"] = (
+                        "2026-11-05T12:10:00Z"
+                    )
+
+                elif (
+                    estado_actual == "resolved"
+                    and params["new_status"] == "in_progress"
+                ):
+                    current["resolved_at"] = None
+
+                return [tuple(current.values())]
+
+            if "INSERT INTO incident_events" in query:
+                if error_historial:
+                    raise RuntimeError(
+                        "Error insertando historial"
+                    )
+                return []
+
+            if "INSERT INTO incident_comments" in query:
+                return []
+
+            raise AssertionError(
+                f"Consulta SQL inesperada: {query}"
+            )
+
+        self.mock_conn.run.side_effect = fake_status_run
+
+    def consultas_estado(self, fragment):
+        """Buscar consultas ejecutadas por el handler."""
+        return [
+            call
+            for call in self.mock_conn.run.call_args_list
+            if fragment in call.args[0]
+        ]
+
+    # TEST 39: Cambiar new a in_progress
+    def test_estado_new_a_in_progress(self):
+        self.preparar_cambio_estado()
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        body = json.loads(response["body"])
+
+        self.assertEqual(
+            body["data"]["status"],
+            "in_progress",
+        )
+
+        self.assertEqual(
+            len(self.consultas_estado("UPDATE incidents")),
+            1,
+        )
+
+        self.assertEqual(
+            len(self.consultas_estado("INSERT INTO incident_events")),
+            1,
+        )
+
+        self.assertEqual(
+            len(self.consultas_estado("COMMIT")),
+            1,
+        )
+
+    # TEST 40: Resolver con comentario
+    def test_estado_resolver_con_comentario(self):
+        self.preparar_cambio_estado(
+            estado_actual="in_progress"
+        )
+
+        self.event["body"] = json.dumps({
+            "status": "resolved",
+            "comment": "Servicio restablecido",
+        })
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        body = json.loads(response["body"])
+
+        self.assertEqual(
+            body["data"]["status"],
+            "resolved",
+        )
+
+        self.assertIsNotNone(
+            body["data"]["resolved_at"]
+        )
+
+        comentarios = self.consultas_estado(
+            "INSERT INTO incident_comments"
+        )
+
+        self.assertEqual(len(comentarios), 1)
+
+        self.assertEqual(
+            comentarios[0].kwargs["body"],
+            "Servicio restablecido",
+        )
+
+        self.assertIn(
+            "FALSE",
+            comentarios[0].args[0],
+        )
+
+        self.assertEqual(
+            self.mock_publish.call_count,
+            2,
+        )
+
+        tipos = [
+            call.kwargs["event_type"]
+            for call in self.mock_publish.call_args_list
+        ]
+
+        self.assertEqual(
+            tipos,
+            ["IncidentUpdated", "IncidentResolved"],
+        )
+
+    # TEST 41: Comentario obligatorio al resolver
+    def test_estado_resolver_sin_comentario(self):
+        self.preparar_cambio_estado()
+
+        self.event["body"] = json.dumps({
+            "status": "resolved"
+        })
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+
+        self.assertEqual(
+            len(self.consultas_estado("UPDATE incidents")),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 42: Transición inválida
+    def test_estado_transicion_invalida(self):
+        self.preparar_cambio_estado(
+            estado_actual="new"
+        )
+
+        self.event["body"] = json.dumps({
+            "status": "closed"
+        })
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 409)
+
+        self.assertEqual(
+            len(self.consultas_estado("UPDATE incidents")),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 43: Customer cierra incidente resuelto
+    def test_estado_customer_cerrar_propio(self):
+        self.preparar_cambio_estado(
+            estado_actual="resolved"
+        )
+
+        self.event["requestContext"]["authorizer"][
+            "lambda"
+        ]["role"] = "customer"
+
+        self.event["body"] = json.dumps({
+            "status": "closed"
+        })
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        consulta = self.consultas_estado(
+            "SELECT *"
+        )[0]
+
+        self.assertIn(
+            "reporter_id = :reporter_id",
+            consulta.args[0],
+        )
+
+        self.assertEqual(
+            consulta.kwargs["reporter_id"],
+            self.reporter_id,
+        )
+
+        body = json.loads(response["body"])
+
+        self.assertEqual(
+            body["data"]["status"],
+            "closed",
+        )
+
+    # TEST 44: Customer reabre incidente resuelto
+    def test_estado_customer_reabrir_propio(self):
+        self.preparar_cambio_estado(
+            estado_actual="resolved"
+        )
+
+        self.event["requestContext"]["authorizer"][
+            "lambda"
+        ]["role"] = "customer"
+
+        self.event["body"] = json.dumps({
+            "status": "in_progress"
+        })
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 200)
+
+        body = json.loads(response["body"])
+
+        self.assertEqual(
+            body["data"]["status"],
+            "in_progress",
+        )
+
+        self.assertIsNone(
+            body["data"]["resolved_at"]
+        )
+
+        updates = self.consultas_estado(
+            "UPDATE incidents"
+        )
+
+        self.assertIn(
+            "resolved_at = NULL",
+            updates[0].args[0],
+        )
+
+    # TEST 45: Customer no consulta incidente ajeno
+    def test_estado_customer_incidente_ajeno(self):
+        self.preparar_cambio_estado(
+            encontrado=False
+        )
+
+        self.event["requestContext"]["authorizer"][
+            "lambda"
+        ]["role"] = "customer"
+
+        self.event["body"] = json.dumps({
+            "status": "closed"
+        })
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 404)
+
+        consulta = self.consultas_estado(
+            "SELECT *"
+        )[0]
+
+        self.assertIn(
+            "reporter_id = :reporter_id",
+            consulta.args[0],
+        )
+
+        self.assertEqual(
+            len(self.consultas_estado("UPDATE incidents")),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 46: Customer no puede resolver
+    def test_estado_customer_transicion_prohibida(self):
+        self.preparar_cambio_estado(
+            estado_actual="new"
+        )
+
+        self.event["requestContext"]["authorizer"][
+            "lambda"
+        ]["role"] = "customer"
+
+        self.event["body"] = json.dumps({
+            "status": "resolved",
+            "comment": "Intento de resolución",
+        })
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 403)
+
+        self.assertEqual(
+            len(self.consultas_estado("UPDATE incidents")),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 47: Incidente inexistente
+    def test_estado_incidente_no_existe(self):
+        self.preparar_cambio_estado(
+            encontrado=False
+        )
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 404)
+
+        self.assertEqual(
+            len(self.consultas_estado("UPDATE incidents")),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()
+
+    # TEST 48: UUID inválido
+    def test_estado_uuid_invalido(self):
+        self.preparar_cambio_estado()
+
+        self.event["pathParameters"] = {
+            "id": "INC-000001"
+        }
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+
+        self.mock_db.assert_not_called()
+
+    # TEST 49: JSON inválido
+    def test_estado_json_invalido(self):
+        self.preparar_cambio_estado()
+
+        self.event["body"] = "{incorrecto}"
+
+        response = incidents.changeIncidentStatus(
+            self.event, None
+        )
+
+        self.assertEqual(response["statusCode"], 400)
+
+        self.mock_db.assert_not_called()
+
+    # TEST 50: Error de BD revierte transacción
+    def test_estado_error_historial_rollback(self):
+        self.preparar_cambio_estado(
+            error_historial=True
+        )
+
+        with self.assertRaises(RuntimeError):
+            incidents.changeIncidentStatus(
+                self.event, None
+            )
+
+        self.assertEqual(
+            len(self.consultas_estado("ROLLBACK")),
+            1,
+        )
+
+        self.assertEqual(
+            len(self.consultas_estado("COMMIT")),
+            0,
+        )
+
+        self.mock_publish.assert_not_called()

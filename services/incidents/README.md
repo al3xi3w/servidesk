@@ -1,79 +1,110 @@
 # ms-incidents — ServiDesk
 
-## Estado actual
+## Descripción
 
-Se implementaron las funcionalidades principales de creación de incidentes del microservicio `ms-incidents`, siguiendo los contratos `API_CONTRACTS.md` y `EVENT_CONTRACTS.md`.
+Microservicio encargado de gestionar incidentes, prioridades, políticas SLA y comentarios dentro de ServiDesk.
+
+Utiliza PostgreSQL con aislamiento multi-tenant mediante schemas y se integra con otros microservicios mediante eventos SNS/SQS.
+
+## Estado de implementación
+
+| Funcionalidad | Estado |
+|---|---|
+| IN-01 · `GET /incidents` | Implementado y probado |
+| IN-02 · `POST /incidents` | Implementado y probado |
+| IN-03 · `GET /incidents/{id}` | Implementado y probado |
+| IN-04 · `PATCH /incidents/{id}` | Implementado y probado |
+| IN-05 · `PUT /incidents/{id}/status` | Implementado y probado |
+| IN-06 · `GET /incidents/{id}/comments` | Pendiente |
+| IN-07 · `POST /incidents/{id}/comments` | Pendiente |
+| Consumidor SQS `CIStatusChanged` | Implementado y probado |
+| Publicación de eventos SNS | Implementada; probada con mocks |
+| Migraciones SQL | `001_init.sql` y `002_events.sql` preparadas |
 
 ### Funcionalidades implementadas
 
-- Creación de incidentes mediante `POST /incidents`.
-- Cálculo automático de prioridad según impacto y urgencia (matriz D6).
-- Consulta de políticas SLA para calcular la fecha límite de resolución.
-- Asignación del reportante desde el contexto del usuario autenticado.
-- Generación de claves correlativas por tenant.
-- Publicación del evento `IncidentCreated`.
-- Creación automática de incidentes P2 mediante eventos `CIStatusChanged` recibidos por SQS.
-- Detección de eventos duplicados y manejo de fallos parciales.
+- Creación manual de incidentes con validaciones y restricciones según el rol.
+- Listado de incidentes con paginación, filtros, búsqueda y ordenamiento.
+- Consulta individual de incidentes con aislamiento por tenant y usuario.
+- Actualización de incidentes y recálculo automático de prioridad y SLA.
+- Transiciones de estado según las reglas del contrato.
+- Registro de cambios de estado en `incident_events`.
+- Creación de comentarios públicos al resolver incidentes.
+- Creación automática de incidentes P2 cuando un CI cambia a `down`.
+- Deduplicación de mensajes mediante `processed_events`.
+- Publicación de `IncidentCreated`, `IncidentUpdated` e `IncidentResolved`.
 
 ## Pruebas unitarias
 
-Se realizaron 20 pruebas unitarias con `pytest` y mocks:
+Se ejecutaron **62 pruebas unitarias exitosas** con `pytest` y mocks.
 
-- `test_incidents.py`: 10 pruebas exitosas.
-- `test_consumers.py`: 10 pruebas exitosas.
+Las pruebas cubren los handlers de incidentes y el consumidor de eventos SQS. No requieren conexión real a AWS ni PostgreSQL.
 
-Para ejecutar todas las pruebas desde la raíz del repositorio:
+Para ejecutarlas desde la raíz del repositorio:
 
 ```bash
 python -m pytest services/incidents/tests/ -v
 ```
 
-Las pruebas fueron realizadas localmente, sin conexiones reales a AWS ni PostgreSQL.
+## Base de datos y migraciones
 
-## Pendientes necesarios para integración
+**Base de datos:** `db_incidents`
 
-### 1. Configurar políticas SLA
+Las tablas se crean dentro del schema correspondiente a cada tenant.
 
-Definir con el equipo los valores oficiales de `response_minutes` y `resolution_minutes` para P1, P2, P3 y P4.
+| Archivo | Contenido |
+|---|---|
+| `001_init.sql` | `sla_policies`, `incidents`, `incident_comments` |
+| `002_events.sql` | `incident_events`, `processed_events` |
 
-Registrar las políticas mediante una migración SQL y asegurar su ejecución para cada tenant.
+El archivo `handlers/migrate.py` fue actualizado para detectar y ejecutar ambas migraciones en orden.
 
-**Necesario:** los handlers consultan `sla_policies` antes de crear un incidente.
+**Estado:** implementación preparada, pendiente de validación contra PostgreSQL real.
 
-### 2. Crear tabla `processed_events`
+## Pendientes para completar el microservicio
 
-Agregar esta tabla mediante una migración SQL en los schemas de los tenants.
+### 1. Implementar IN-06 e IN-07
 
-**Necesario:** `consumers.py` la utiliza para evitar procesar dos veces el mismo evento SQS.
+- IN-06: listar comentarios de un incidente, con paginación y restricciones de visibilidad.
+- IN-07: agregar comentarios, validando permisos, contenido y estado del incidente.
 
-### 3. Configurar SQS
+### 2. Configurar los endpoints en `serverless.yml`
 
-Agregar `functionResponseType: ReportBatchItemFailures` al evento SQS de `onCiStatusChanged` en `serverless.yml`.
+Registrar las rutas restantes y vincularlas a sus respectivos handlers con el Lambda Authorizer.
 
-**Necesario:** permite que AWS Lambda interprete los fallos individuales de los mensajes procesados.
+Verificar también la configuración de permisos y eventos SQS.
 
-### 4. Completar seguridad de `GET /incidents`
+### 3. Definir y registrar políticas SLA
 
-Implementar el filtrado por `reporter_id` para que los usuarios `customer` únicamente puedan consultar sus propios incidentes.
+El equipo debe confirmar los valores oficiales de `response_minutes` y `resolution_minutes` para las prioridades P1, P2, P3 y P4.
 
-Incorporar la paginación y los filtros definidos en IN-01 para cumplir el contrato de API.
+Los handlers ya consultan la tabla `sla_policies`, pero necesitan que existan políticas configuradas para crear y recalcular incidentes.
 
-**Necesario antes de habilitar el endpoint para usuarios reales.**
+Los valores deberán registrarse mediante una migración SQL.
 
-### 5. Integración con AWS
+### 4. Completar la integración de eventos
 
-Cuando la infraestructura compartida esté disponible, verificar:
+- Habilitar `ReportBatchItemFailures` para el consumidor SQS.
+- Verificar los permisos y la publicación SNS.
+- Validar los formatos definitivos de los eventos con los microservicios consumidores.
 
-- Conectividad con RDS PostgreSQL.
-- Ejecución de las migraciones.
-- Funcionamiento de API Gateway y Lambda Authorizer.
-- Permisos de publicación en SNS.
-- Recepción y procesamiento de eventos SQS.
+### 5. Validar las migraciones e integración
+
+- Probar las migraciones en PostgreSQL.
+- Verificar el aislamiento de datos entre tenants.
+- Ejecutar pruebas de integración de los endpoints.
+- Verificar la comunicación con API Gateway, Lambda, RDS, SNS y SQS.
+
+### 6. Tablas pendientes del contrato
+
+La tabla `incident_attachments` está pendiente de definición e implementación según el alcance del contrato.
+
+La tabla `incident_events` ya fue contemplada en `002_events.sql`.
 
 ## Observaciones
 
-El microservicio se encuentra implementado y probado a nivel unitario. No se ha realizado un despliegue ni pruebas de integración en AWS.
-
-Los tiempos SLA oficiales están pendientes de definición por parte del equipo.
-
-Los contratos utilizados corresponden a la propuesta v0.9, pendiente de aprobación definitiva.
+- El microservicio está en desarrollo y aún no se ha desplegado.
+- Las 62 pruebas exitosas son unitarias y utilizan mocks.
+- Las migraciones nuevas todavía no se han validado en una base de datos real.
+- Las políticas SLA oficiales siguen pendientes de aprobación.
+- Los contratos del equipo corresponden a la propuesta `v0.9`.

@@ -697,3 +697,597 @@ def getIncident(event, context):
     return ok({
         "data": serialize_incident(incident)
     })
+
+def updateIncident(event, context):
+    """IN-04: PATCH /incidents/{id}."""
+
+    ctx = tenant_ctx(event)
+    role = ctx["role"]
+
+    # 1. Solo administradores y agentes
+    if role not in ("admin", "agent"):
+        return api_error(
+            "FORBIDDEN",
+            "No tienes permiso para actualizar incidentes",
+            403,
+            context=context,
+        )
+
+    # 2. Validar ID de la ruta
+    try:
+        incident_id = str(uuid.UUID(
+            (event.get("pathParameters") or {}).get("id")
+        ))
+    except (ValueError, TypeError, AttributeError):
+        return api_error(
+            "VALIDATION_ERROR",
+            "ID de incidente inválido",
+            400,
+            context=context,
+        )
+
+    # 3. Leer y validar JSON
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except (ValueError, TypeError):
+        return api_error(
+            "VALIDATION_ERROR",
+            "JSON inválido",
+            400,
+            context=context,
+        )
+
+    if not isinstance(body, dict) or not body:
+        return api_error(
+            "VALIDATION_ERROR",
+            "Debes enviar al menos un campo",
+            400,
+            context=context,
+        )
+
+    allowed_fields = {
+        "title", "description", "impact", "urgency",
+        "ci_id", "team_id", "assignee_id", "problem_id",
+    }
+
+    unknown = set(body) - allowed_fields
+
+    if unknown:
+        return api_error(
+            "VALIDATION_ERROR",
+            "Campos no permitidos: " + ", ".join(sorted(unknown)),
+            400,
+            context=context,
+        )
+
+    # 4. Validar título
+    if "title" in body:
+        value = body["title"]
+        if not isinstance(value, str) or not 3 <= len(value) <= 200:
+            return api_error(
+                "VALIDATION_ERROR",
+                "title debe tener entre 3 y 200 caracteres",
+                400,
+                context=context,
+            )
+
+    # 5. Validar descripción
+    if "description" in body:
+        value = body["description"]
+        if not isinstance(value, str) or len(value) > 5000:
+            return api_error(
+                "VALIDATION_ERROR",
+                "description debe ser texto de máximo 5000 caracteres",
+                400,
+                context=context,
+            )
+
+    # 6. Validar impacto y urgencia
+    for field in ("impact", "urgency"):
+        if field in body and body[field] not in (
+            "high", "medium", "low"
+        ):
+            return api_error(
+                "VALIDATION_ERROR",
+                f"Valor inválido para {field}",
+                400,
+                context=context,
+            )
+
+    # 7. Validar UUID opcionales
+    for field in (
+        "ci_id", "team_id", "assignee_id", "problem_id"
+    ):
+        if field not in body or body[field] is None:
+            continue
+
+        try:
+            body[field] = str(uuid.UUID(body[field]))
+        except (ValueError, TypeError, AttributeError):
+            return api_error(
+                "VALIDATION_ERROR",
+                f"UUID inválido: {field}",
+                400,
+                context=context,
+            )
+
+    conn = tenant_conn(ctx["schema"])
+    transaction_started = False
+
+    try:
+        # 8. Iniciar transacción
+        conn.run("BEGIN")
+        transaction_started = True
+
+        # 9. Consultar y bloquear el incidente
+        rows = conn.run(
+            """
+            SELECT *
+            FROM incidents
+            WHERE id = :incident_id
+            FOR UPDATE
+            """,
+            incident_id=incident_id,
+        )
+
+        if not rows:
+            conn.run("ROLLBACK")
+            transaction_started = False
+            return api_error(
+                "NOT_FOUND",
+                "Incidente no encontrado",
+                404,
+                context=context,
+            )
+
+        cols = [c["name"] for c in conn.columns]
+        current = dict(zip(cols, rows[0]))
+
+        # 10. No editar incidentes cerrados
+        if current["status"] == "closed":
+            conn.run("ROLLBACK")
+            transaction_started = False
+            return api_error(
+                "CONFLICT",
+                "No se puede editar un incidente cerrado",
+                409,
+                context=context,
+            )
+
+        updates = dict(body)
+
+        # 11. Recalcular prioridad y SLA cuando
+        # cambie impacto o urgencia
+        priority_changed = (
+            ("impact" in body and body["impact"] != current["impact"])
+            or
+            ("urgency" in body and body["urgency"] != current["urgency"])
+        )
+
+        if priority_changed:
+            impact = updates.get("impact", current["impact"])
+            urgency = updates.get("urgency", current["urgency"])
+
+            matrix = {
+                "high": {
+                    "high": "P1",
+                    "medium": "P2",
+                    "low": "P3",
+                },
+                "medium": {
+                    "high": "P2",
+                    "medium": "P3",
+                    "low": "P4",
+                },
+                "low": {
+                    "high": "P3",
+                    "medium": "P4",
+                    "low": "P4",
+                },
+            }
+
+            if (
+                impact not in matrix
+                or urgency not in matrix[impact]
+            ):
+                conn.run("ROLLBACK")
+                transaction_started = False
+                return api_error(
+                    "VALIDATION_ERROR",
+                    "Impacto o urgencia inválidos",
+                    400,
+                    context=context,
+                )
+
+            priority = matrix[impact][urgency]
+
+            policies = conn.run(
+                """
+                SELECT id, resolution_minutes
+                FROM sla_policies
+                WHERE priority = :priority
+                ORDER BY id
+                LIMIT 1
+                """,
+                priority=priority,
+            )
+
+            if not policies:
+                conn.run("ROLLBACK")
+                transaction_started = False
+                return api_error(
+                    "SLA_NOT_CONFIGURED",
+                    f"No existe política SLA para {priority}",
+                    500,
+                    context=context,
+                )
+
+            updates["priority"] = priority
+            updates["sla_policy_id"] = policies[0][0]
+            updates["resolution_minutes"] = policies[0][1]
+
+        # 12. Construir actualización parametrizada
+        # Los nombres de columnas vienen de una lista permitida,
+        # no directamente del usuario.
+        assignments = []
+
+        for field in updates:
+            if field == "resolution_minutes":
+                continue
+
+            assignments.append(f"{field} = :{field}")
+
+        if priority_changed:
+            assignments.append(
+                "sla_due_at = ("
+                "CURRENT_TIMESTAMP AT TIME ZONE 'UTC' "
+                "+ :resolution_minutes * INTERVAL '1 minute'"
+                ")"
+            )
+
+        sql = (
+            "UPDATE incidents SET "
+            + ", ".join(assignments)
+            + " WHERE id = :incident_id RETURNING *"
+        )
+
+        rows = conn.run(
+            sql,
+            incident_id=incident_id,
+            **updates,
+        )
+
+        cols = [c["name"] for c in conn.columns]
+        updated = dict(zip(cols, rows[0]))
+
+        # 13. Confirmar cambios
+        conn.run("COMMIT")
+        transaction_started = False
+
+    except Exception:
+        if transaction_started:
+            conn.run("ROLLBACK")
+        raise
+
+    # 14. Publicar evento después del COMMIT
+    publish(
+        event_type="IncidentUpdated",
+        tenant_id=ctx["tenant_id"],
+        data={
+            "incidentId": str(updated["id"]),
+            "key": updated["key"],
+            "status": updated["status"],
+            "priority": updated["priority"],
+            "assigneeId": (
+                str(updated["assignee_id"])
+                if updated.get("assignee_id")
+                else None
+            ),
+            "teamId": (
+                str(updated["team_id"])
+                if updated.get("team_id")
+                else None
+            ),
+            "actorId": ctx["user_id"],
+            "changedFields": list(body.keys()),
+        },
+        source="ms-incidents",
+    )
+
+    # 15. Responder con el incidente actualizado
+    return ok({
+        "data": serialize_incident(updated)
+    })
+
+
+def changeIncidentStatus(event, context):
+    """IN-05: PUT /incidents/{id}/status."""
+
+    ctx = tenant_ctx(event)
+    role = ctx["role"]
+    user_id = ctx["user_id"]
+
+    # 1. Validar rol
+    if role not in ("admin", "agent", "customer"):
+        return api_error(
+            "FORBIDDEN",
+            "No tienes permiso para cambiar estados",
+            403,
+            context=context,
+        )
+
+    # 2. Validar ID
+    try:
+        incident_id = str(uuid.UUID(
+            (event.get("pathParameters") or {}).get("id")
+        ))
+    except (ValueError, TypeError, AttributeError):
+        return api_error(
+            "VALIDATION_ERROR",
+            "ID de incidente inválido",
+            400,
+            context=context,
+        )
+
+    # 3. Leer JSON
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except (ValueError, TypeError):
+        return api_error(
+            "VALIDATION_ERROR",
+            "JSON inválido",
+            400,
+            context=context,
+        )
+
+    if not isinstance(body, dict):
+        return api_error(
+            "VALIDATION_ERROR",
+            "El body debe ser un objeto JSON",
+            400,
+            context=context,
+        )
+
+    if set(body) - {"status", "comment"}:
+        return api_error(
+            "VALIDATION_ERROR",
+            "El body contiene campos no permitidos",
+            400,
+            context=context,
+        )
+
+    new_status = body.get("status")
+    comment = body.get("comment")
+
+    valid_statuses = {
+        "new", "in_progress", "on_hold",
+        "resolved", "closed",
+    }
+
+    if (
+        not isinstance(new_status, str)
+        or new_status not in valid_statuses
+    ):
+        return api_error(
+            "VALIDATION_ERROR",
+            "Estado inválido",
+            400,
+            context=context,
+        )
+
+    if comment is not None:
+        if (
+            not isinstance(comment, str)
+            or not 1 <= len(comment.strip()) <= 5000
+        ):
+            return api_error(
+                "VALIDATION_ERROR",
+                "comment debe tener entre 1 y 5000 caracteres",
+                400,
+                context=context,
+            )
+
+    # 4. Definir las transiciones del contrato
+    transitions = {
+        "new": {"in_progress", "on_hold", "resolved"},
+        "in_progress": {"on_hold", "resolved"},
+        "on_hold": {"in_progress", "resolved"},
+        "resolved": {"closed", "in_progress"},
+        "closed": set(),
+    }
+
+    conn = tenant_conn(ctx["schema"])
+    transaction_started = False
+
+    try:
+        conn.run("BEGIN")
+        transaction_started = True
+
+        # 5. Consultar y bloquear el incidente
+        params = {"incident_id": incident_id}
+
+        sql = """
+            SELECT *
+            FROM incidents
+            WHERE id = :incident_id
+        """
+
+        # No revelar incidentes ajenos a customers
+        if role == "customer":
+            sql += " AND reporter_id = :reporter_id"
+            params["reporter_id"] = user_id
+
+        sql += " FOR UPDATE"
+
+        rows = conn.run(sql, **params)
+
+        if not rows:
+            conn.run("ROLLBACK")
+            transaction_started = False
+            return api_error(
+                "NOT_FOUND",
+                "Incidente no encontrado",
+                404,
+                context=context,
+            )
+
+        cols = [c["name"] for c in conn.columns]
+        incident = dict(zip(cols, rows[0]))
+
+        old_status = incident["status"]
+
+        # 6. Permisos específicos de customer
+        if role == "customer":
+            allowed_customer = (
+                old_status == "resolved"
+                and new_status in {"closed", "in_progress"}
+            )
+
+            if not allowed_customer:
+                conn.run("ROLLBACK")
+                transaction_started = False
+                return api_error(
+                    "FORBIDDEN",
+                    "No tienes permiso para esta transición",
+                    403,
+                    context=context,
+                )
+
+        # 7. Validar transición
+        if new_status not in transitions.get(old_status, set()):
+            conn.run("ROLLBACK")
+            transaction_started = False
+            return api_error(
+                "INVALID_STATUS_TRANSITION",
+                "Transición de estado no permitida",
+                409,
+                context=context,
+            )
+
+        # 8. Comentario obligatorio al resolver
+        if new_status == "resolved" and comment is None:
+            conn.run("ROLLBACK")
+            transaction_started = False
+            return api_error(
+                "VALIDATION_ERROR",
+                "comment es obligatorio al resolver",
+                400,
+                context=context,
+            )
+
+        # 9. Actualizar estado y fecha de resolución
+        if new_status == "resolved":
+            resolved_sql = (
+                "CURRENT_TIMESTAMP AT TIME ZONE 'UTC'"
+            )
+        elif old_status == "resolved" and new_status == "in_progress":
+            resolved_sql = "NULL"
+        else:
+            resolved_sql = "resolved_at"
+
+        rows = conn.run(
+            f"""
+            UPDATE incidents
+            SET status = :new_status,
+                resolved_at = {resolved_sql}
+            WHERE id = :incident_id
+            RETURNING *
+            """,
+            new_status=new_status,
+            incident_id=incident_id,
+        )
+
+        cols = [c["name"] for c in conn.columns]
+        updated = dict(zip(cols, rows[0]))
+
+        # 10. Registrar historial de transición
+        # Requiere migración de incident_events.
+        conn.run(
+            """
+            INSERT INTO incident_events (
+                incident_id,
+                actor_id,
+                old_status,
+                new_status
+            )
+            VALUES (
+                :incident_id,
+                :actor_id,
+                :old_status,
+                :new_status
+            )
+            """,
+            incident_id=incident_id,
+            actor_id=user_id,
+            old_status=old_status,
+            new_status=new_status,
+        )
+
+        # 11. Guardar comentario público, si existe
+        if comment is not None:
+            conn.run(
+                """
+                INSERT INTO incident_comments (
+                    incident_id,
+                    author_id,
+                    body,
+                    internal
+                )
+                VALUES (
+                    :incident_id,
+                    :author_id,
+                    :body,
+                    FALSE
+                )
+                """,
+                incident_id=incident_id,
+                author_id=user_id,
+                body=comment.strip(),
+            )
+
+        # 12. Confirmar transacción
+        conn.run("COMMIT")
+        transaction_started = False
+
+    except Exception:
+        if transaction_started:
+            conn.run("ROLLBACK")
+        raise
+
+    # 13. Publicar eventos después del COMMIT
+    event_data = {
+        "incidentId": str(updated["id"]),
+        "key": updated["key"],
+        "status": new_status,
+        "previousStatus": old_status,
+        "priority": updated["priority"],
+        "reporterId": (
+            str(updated["reporter_id"])
+            if updated.get("reporter_id") else None
+        ),
+        "assigneeId": (
+            str(updated["assignee_id"])
+            if updated.get("assignee_id") else None
+        ),
+        "actorId": user_id,
+    }
+
+    publish(
+        event_type="IncidentUpdated",
+        tenant_id=ctx["tenant_id"],
+        data=event_data,
+        source="ms-incidents",
+    )
+
+    if new_status == "resolved":
+        publish(
+            event_type="IncidentResolved",
+            tenant_id=ctx["tenant_id"],
+            data=event_data,
+            source="ms-incidents",
+        )
+
+    # 14. Respuesta IN-05
+    return ok({
+        "data": serialize_incident(updated)
+    })
