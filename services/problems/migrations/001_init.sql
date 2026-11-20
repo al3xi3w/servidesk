@@ -138,3 +138,27 @@ ON problem_incidents (incident_id);
 
 CREATE INDEX IF NOT EXISTS idx_problem_tasks_problem
 ON problem_tasks (problem_id);
+-- 6. EVENTOS SQS YA PROCESADOS (decision D10)
+CREATE TABLE IF NOT EXISTS processed_events (
+    event_id UUID PRIMARY KEY,
+    event_type VARCHAR(60) NOT NULL,
+    processed_at TIMESTAMP NOT NULL DEFAULT
+        (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')
+);
+
+-- 7. REGISTRO LOCAL DE INCIDENTES POR CI (consumidor problems-incidents-q)
+-- Copia minima de IncidentCreated para detectar 3 o mas incidentes del mismo CI en 24 h
+-- sin consultar la base de ms-incidents.
+CREATE TABLE IF NOT EXISTS ci_incident_log (
+    incident_id UUID PRIMARY KEY,
+    ci_id UUID NOT NULL,
+    priority VARCHAR(2),
+    title VARCHAR(200),
+    occurred_at TIMESTAMP NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ci_incident_log_ci
+ON ci_incident_log (ci_id, occurred_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_problems_fix_change
+ON problems (fix_change_id);

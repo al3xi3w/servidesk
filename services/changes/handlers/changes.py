@@ -1,6 +1,7 @@
 
 """Handlers HTTP de ms-changes."""
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -1402,7 +1403,15 @@ def changeChangeStatus(event, context):
     elif final_status == "implemented":
         event_type = "ChangeImplemented"
 
+    # 12. ChangeDetail actualizado (también alimenta el evento)
+    detail_response = getChange(event, context)
+
     if event_type is not None:
+        try:
+            detail = json.loads(detail_response.get("body") or "{}").get("data") or {}
+        except (TypeError, ValueError, AttributeError):
+            detail = {}
+
         publish(
             event_type=event_type,
             tenant_id=ctx["tenant_id"],
@@ -1412,13 +1421,20 @@ def changeChangeStatus(event, context):
                 "type": change_type,
                 "risk": risk,
                 "status": final_status,
+                "plannedStart": detail.get("planned_start"),
+                "requesterId": detail.get("requester_id"),
+                # ms-problems cierra este problema; ms-cmdb aplica new_version a cada CI
+                "problemId": detail.get("problem_id"),
+                "cis": [
+                    {"ciId": ci.get("ci_id"), "newVersion": ci.get("new_version")}
+                    for ci in detail.get("cis") or []
+                ],
                 "actorId": ctx["user_id"],
             },
             source="ms-changes",
         )
 
-    # 12. Devolver ChangeDetail actualizado
-    return getChange(event, context)
+    return detail_response
 
 def approveChange(event, context):
     """CH-06: POST /changes/{id}/approve."""

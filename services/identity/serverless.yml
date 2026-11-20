@@ -1,6 +1,7 @@
 # Identidad: login/JWT, usuarios, equipos, notificaciones (consumidor identity-notify-q)
 service: servidesk-identity
 frameworkVersion: "3"
+configValidationMode: warn   # el esquema de Serverless v3 no lista python3.12 (AWS sí lo soporta)
 
 provider:
   name: aws
@@ -37,6 +38,7 @@ package:
     - "!**"
     - "handlers/**"
     - "migrations/**"
+    - "!**/__pycache__/**"
 
 functions:
   # ID-01 (pública)

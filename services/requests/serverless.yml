@@ -2,12 +2,14 @@
 # Responsable: Daniel
 service: servidesk-requests
 frameworkVersion: "3"
+configValidationMode: warn   # el esquema de Serverless v3 no lista python3.12 (AWS sí lo soporta)
 
 provider:
   name: aws
   runtime: python3.12
   region: us-east-1
   stage: ${opt:stage, 'dev'}
+  timeout: 15
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
   layers:
@@ -35,16 +37,40 @@ package:
     - "!**"
     - "handlers/**"
     - "migrations/**"
+    - "!**/__pycache__/**"
 
 functions:
+  # RQ-01
+  listCatalog:
+    handler: handlers/requests.listCatalog
+    events:
+      - httpApi: { method: GET, path: /catalog, authorizer: { name: jwtAuthorizer } }
+  # RQ-02
   listRequests:
     handler: handlers/requests.listRequests
     events:
-      - httpApi:
-          method: GET
-          path: /requests
-          authorizer:
-            name: jwtAuthorizer
+      - httpApi: { method: GET, path: /requests, authorizer: { name: jwtAuthorizer } }
+  # RQ-03
+  createRequest:
+    handler: handlers/requests.createRequest
+    events:
+      - httpApi: { method: POST, path: /requests, authorizer: { name: jwtAuthorizer } }
+  # RQ-04
+  getRequest:
+    handler: handlers/requests.getRequest
+    events:
+      - httpApi: { method: GET, path: "/requests/{id}", authorizer: { name: jwtAuthorizer } }
+  # RQ-05
+  updateRequest:
+    handler: handlers/requests.updateRequest
+    events:
+      - httpApi: { method: PATCH, path: "/requests/{id}", authorizer: { name: jwtAuthorizer } }
+  # RQ-06
+  changeRequestStatus:
+    handler: handlers/requests.changeRequestStatus
+    events:
+      - httpApi: { method: PUT, path: "/requests/{id}/status", authorizer: { name: jwtAuthorizer } }
+
   migrate:
     handler: handlers/migrate.handle   # se invoca a mano tras el deploy
     timeout: 300

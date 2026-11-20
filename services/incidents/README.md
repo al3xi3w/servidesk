@@ -504,3 +504,13 @@ La configuración de Serverless y AWS se realiza por el equipo responsable de in
 | Políticas SLA oficiales | Pendientes |
 
 **Estado del microservicio:** lógica principal implementada y probada unitariamente. Pendiente de validación de base de datos, configuración de infraestructura y pruebas de integración.
+## Consumidores SQS (F3)
+
+| Cola | Evento | Efecto | Handler |
+|---|---|---|---|
+| `incidents-ci-q` | `CIStatusChanged` (down) | incidente automático P2, canal `auto` | `consumers.on_ci_status_changed` |
+| `incidents-problem-q` | `ProblemIncidentsLinked` | fija `incidents.problem_id` | `problem_events.on_problem_incidents_linked` |
+| `incidents-kedb-q` | `KnownErrorPublished` | comenta el workaround (público) en los incidentes vinculados no cerrados | `problem_events.on_known_error_published` |
+
+Todas con DLQ (`maxReceiveCount: 3`), `ReportBatchItemFailures` e idempotencia por `processed_events`.
+La migración `003_sla_policies.sql` carga las políticas SLA base (P1 4 h, P2 8 h, P3 24 h, P4 72 h).

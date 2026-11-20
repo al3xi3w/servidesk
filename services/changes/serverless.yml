@@ -2,12 +2,14 @@
 # Responsable: Daniel
 service: servidesk-changes
 frameworkVersion: "3"
+configValidationMode: warn   # el esquema de Serverless v3 no lista python3.12 (AWS sí lo soporta)
 
 provider:
   name: aws
   runtime: python3.12
   region: us-east-1
   stage: ${opt:stage, 'dev'}
+  timeout: 15
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
   layers:
@@ -35,16 +37,45 @@ package:
     - "!**"
     - "handlers/**"
     - "migrations/**"
+    - "!**/__pycache__/**"
 
 functions:
+  # CH-01
   listChanges:
     handler: handlers/changes.listChanges
     events:
-      - httpApi:
-          method: GET
-          path: /changes
-          authorizer:
-            name: jwtAuthorizer
+      - httpApi: { method: GET, path: /changes, authorizer: { name: jwtAuthorizer } }
+  # CH-02
+  createChange:
+    handler: handlers/changes.createChange
+    events:
+      - httpApi: { method: POST, path: /changes, authorizer: { name: jwtAuthorizer } }
+  # CH-03
+  getChange:
+    handler: handlers/changes.getChange
+    events:
+      - httpApi: { method: GET, path: "/changes/{id}", authorizer: { name: jwtAuthorizer } }
+  # CH-04
+  updateChange:
+    handler: handlers/changes.updateChange
+    events:
+      - httpApi: { method: PATCH, path: "/changes/{id}", authorizer: { name: jwtAuthorizer } }
+  # CH-05
+  changeChangeStatus:
+    handler: handlers/changes.changeChangeStatus
+    events:
+      - httpApi: { method: PUT, path: "/changes/{id}/status", authorizer: { name: jwtAuthorizer } }
+  # CH-06
+  approveChange:
+    handler: handlers/changes.approveChange
+    events:
+      - httpApi: { method: POST, path: "/changes/{id}/approve", authorizer: { name: jwtAuthorizer } }
+  # CH-07
+  rejectChange:
+    handler: handlers/changes.rejectChange
+    events:
+      - httpApi: { method: POST, path: "/changes/{id}/reject", authorizer: { name: jwtAuthorizer } }
+
   migrate:
     handler: handlers/migrate.handle   # se invoca a mano tras el deploy
     timeout: 300

@@ -458,3 +458,11 @@ Aunque la lógica principal está implementada, todavía quedan tareas para inte
 - Una prueba real exitosa de PR-01 en AWS.
 
 **Estado del microservicio:** lógica principal implementada y probada unitariamente. Pendiente de pruebas de integración completas y exposición HTTP de PR-02 a PR-07 por parte del equipo responsable de Serverless.
+## Consumidores SQS (F3)
+
+| Cola | Evento | Efecto | Handler |
+|---|---|---|---|
+| `problems-incidents-q` | `IncidentCreated` | registra el incidente en `ci_incident_log`; con **3 o más incidentes del mismo CI en 24 h** crea un problema automático (prioridad = la peor del grupo) o vincula los nuevos al problema abierto del CI; publica `ProblemCreated` / `ProblemIncidentsLinked` | `consumers.on_incident_created` |
+| `problems-changes-q` | `ChangeImplemented` | cierra el problema con ese `fix_change_id` o el `problemId` del cambio y completa `root_cause` | `consumers.on_change_implemented` |
+
+DLQ, `ReportBatchItemFailures` e idempotencia por `processed_events` (tablas nuevas al final de `001_init.sql`).

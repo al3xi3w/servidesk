@@ -1,13 +1,16 @@
 # Incidentes: colas, SLA, comentarios, adjuntos
-# Responsable: Ian
+# Consume: incidents-ci-q (CIStatusChanged), incidents-problem-q (ProblemIncidentsLinked),
+#          incidents-kedb-q (KnownErrorPublished)
 service: servidesk-incidents
 frameworkVersion: "3"
+configValidationMode: warn   # el esquema de Serverless v3 no lista python3.12 (AWS sí lo soporta)
 
 provider:
   name: aws
   runtime: python3.12
   region: us-east-1
   stage: ${opt:stage, 'dev'}
+  timeout: 15
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
   layers:
@@ -37,33 +40,65 @@ package:
     - "!**"
     - "handlers/**"
     - "migrations/**"
+    - "!**/__pycache__/**"
 
 functions:
+  # IN-01
   listIncidents:
     handler: handlers/incidents.listIncidents
     events:
-      - httpApi:
-          method: GET
-          path: /incidents
-          authorizer:
-            name: jwtAuthorizer
+      - httpApi: { method: GET, path: /incidents, authorizer: { name: jwtAuthorizer } }
+  # IN-02
   createIncident:
     handler: handlers/incidents.createIncident
     events:
-      - httpApi:
-          method: POST
-          path: /incidents
-          authorizer:
-            name: jwtAuthorizer
+      - httpApi: { method: POST, path: /incidents, authorizer: { name: jwtAuthorizer } }
+  # IN-03
+  getIncident:
+    handler: handlers/incidents.getIncident
+    events:
+      - httpApi: { method: GET, path: "/incidents/{id}", authorizer: { name: jwtAuthorizer } }
+  # IN-04
+  updateIncident:
+    handler: handlers/incidents.updateIncident
+    events:
+      - httpApi: { method: PATCH, path: "/incidents/{id}", authorizer: { name: jwtAuthorizer } }
+  # IN-05
+  changeIncidentStatus:
+    handler: handlers/incidents.changeIncidentStatus
+    events:
+      - httpApi: { method: PUT, path: "/incidents/{id}/status", authorizer: { name: jwtAuthorizer } }
+  # IN-06
+  listIncidentComments:
+    handler: handlers/incidents.listIncidentComments
+    events:
+      - httpApi: { method: GET, path: "/incidents/{id}/comments", authorizer: { name: jwtAuthorizer } }
+  # IN-07
+  addIncidentComment:
+    handler: handlers/incidents.addIncidentComment
+    events:
+      - httpApi: { method: POST, path: "/incidents/{id}/comments", authorizer: { name: jwtAuthorizer } }
+
   migrate:
     handler: handlers/migrate.handle   # se invoca a mano tras el deploy
     timeout: 300
+
+  # ---- Consumidores SQS ----
   onCiStatusChanged:
     handler: handlers/consumers.on_ci_status_changed
+    timeout: 30
     events:
-      - sqs:
-          arn: !GetAtt CiStatusQueue.Arn
-          batchSize: 10
+      - sqs: { arn: !GetAtt CiStatusQueue.Arn, batchSize: 10, functionResponseType: ReportBatchItemFailures }
+  onProblemIncidentsLinked:
+    handler: handlers/problem_events.on_problem_incidents_linked
+    timeout: 30
+    events:
+      - sqs: { arn: !GetAtt ProblemLinkQueue.Arn, batchSize: 10, functionResponseType: ReportBatchItemFailures }
+  onKnownErrorPublished:
+    handler: handlers/problem_events.on_known_error_published
+    timeout: 30
+    events:
+      - sqs: { arn: !GetAtt KedbQueue.Arn, batchSize: 10, functionResponseType: ReportBatchItemFailures }
 
 resources:
   Resources:
@@ -76,15 +111,18 @@ resources:
         Principal: apigateway.amazonaws.com
         SourceArn: !Join ["", ["arn:aws:execute-api:", !Ref AWS::Region, ":", !Ref AWS::AccountId, ":", !Ref HttpApi, "/*"]]
 
-    # ---- Ejemplo de consumidor: CMDB publica CIStatusChanged -> esta cola ----
+    # ---- incidents-ci-q: CMDB publica CIStatusChanged (down) -> incidente automático P2 ----
     CiStatusDLQ:
       Type: AWS::SQS::Queue
+      Properties:
+        QueueName: servidesk-incidents-ci-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600
     CiStatusQueue:
       Type: AWS::SQS::Queue
       Properties:
-        RedrivePolicy:
-          deadLetterTargetArn: !GetAtt CiStatusDLQ.Arn
-          maxReceiveCount: 3
+        QueueName: servidesk-incidents-ci-q-${sls:stage}
+        VisibilityTimeout: 180
+        RedrivePolicy: { deadLetterTargetArn: !GetAtt CiStatusDLQ.Arn, maxReceiveCount: 3 }
     CiStatusQueuePolicy:
       Type: AWS::SQS::QueuePolicy
       Properties:
@@ -95,8 +133,7 @@ resources:
               Principal: { Service: sns.amazonaws.com }
               Action: sqs:SendMessage
               Resource: !GetAtt CiStatusQueue.Arn
-              Condition:
-                ArnEquals: { aws:SourceArn: "${param:eventsTopicArn}" }
+              Condition: { ArnEquals: { aws:SourceArn: "${param:eventsTopicArn}" } }
     CiStatusSubscription:
       Type: AWS::SNS::Subscription
       Properties:
@@ -104,5 +141,68 @@ resources:
         Protocol: sqs
         Endpoint: !GetAtt CiStatusQueue.Arn
         RawMessageDelivery: true
-        FilterPolicy:
-          eventType: [CIStatusChanged]
+        FilterPolicy: { eventType: [CIStatusChanged] }
+
+    # ---- incidents-problem-q: ProblemIncidentsLinked -> fija incidents.problem_id ----
+    ProblemLinkDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: servidesk-incidents-problem-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600
+    ProblemLinkQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: servidesk-incidents-problem-q-${sls:stage}
+        VisibilityTimeout: 180
+        RedrivePolicy: { deadLetterTargetArn: !GetAtt ProblemLinkDLQ.Arn, maxReceiveCount: 3 }
+    ProblemLinkQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues: [!Ref ProblemLinkQueue]
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: { Service: sns.amazonaws.com }
+              Action: sqs:SendMessage
+              Resource: !GetAtt ProblemLinkQueue.Arn
+              Condition: { ArnEquals: { aws:SourceArn: "${param:eventsTopicArn}" } }
+    ProblemLinkSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: ${param:eventsTopicArn}
+        Protocol: sqs
+        Endpoint: !GetAtt ProblemLinkQueue.Arn
+        RawMessageDelivery: true
+        FilterPolicy: { eventType: [ProblemIncidentsLinked] }
+
+    # ---- incidents-kedb-q: KnownErrorPublished -> comenta el workaround ----
+    KedbDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: servidesk-incidents-kedb-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600
+    KedbQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: servidesk-incidents-kedb-q-${sls:stage}
+        VisibilityTimeout: 180
+        RedrivePolicy: { deadLetterTargetArn: !GetAtt KedbDLQ.Arn, maxReceiveCount: 3 }
+    KedbQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues: [!Ref KedbQueue]
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: { Service: sns.amazonaws.com }
+              Action: sqs:SendMessage
+              Resource: !GetAtt KedbQueue.Arn
+              Condition: { ArnEquals: { aws:SourceArn: "${param:eventsTopicArn}" } }
+    KedbSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: ${param:eventsTopicArn}
+        Protocol: sqs
+        Endpoint: !GetAtt KedbQueue.Arn
+        RawMessageDelivery: true
+        FilterPolicy: { eventType: [KnownErrorPublished] }
