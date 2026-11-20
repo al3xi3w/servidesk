@@ -1,5 +1,5 @@
-# CMDB: elementos de configuración y relaciones
-# Responsable: José
+# CMDB: elementos de configuración, relaciones, tipos e historial
+# Publica: CIStatusChanged · Consume: cmdb-changes-q (ChangeImplemented)
 service: servidesk-cmdb
 frameworkVersion: "3"
 configValidationMode: warn   # el esquema de Serverless v3 no lista python3.12 (AWS sí lo soporta)
@@ -9,6 +9,7 @@ provider:
   runtime: python3.12
   region: us-east-1
   stage: ${opt:stage, 'dev'}
+  timeout: 15
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
   layers:
@@ -39,17 +40,57 @@ package:
     - "!**/__pycache__/**"
 
 functions:
+  # CM-01
   listCis:
     handler: handlers/cis.listCis
     events:
-      - httpApi:
-          method: GET
-          path: /cis
-          authorizer:
-            name: jwtAuthorizer
+      - httpApi: { method: GET, path: /cis, authorizer: { name: jwtAuthorizer } }
+  # CM-02
+  createCi:
+    handler: handlers/cis.createCi
+    events:
+      - httpApi: { method: POST, path: /cis, authorizer: { name: jwtAuthorizer } }
+  # CM-03
+  getCi:
+    handler: handlers/cis.getCi
+    events:
+      - httpApi: { method: GET, path: "/cis/{id}", authorizer: { name: jwtAuthorizer } }
+  # CM-04
+  updateCi:
+    handler: handlers/cis.updateCi
+    events:
+      - httpApi: { method: PATCH, path: "/cis/{id}", authorizer: { name: jwtAuthorizer } }
+  # CM-05
+  changeCiStatus:
+    handler: handlers/cis.changeCiStatus
+    events:
+      - httpApi: { method: PUT, path: "/cis/{id}/status", authorizer: { name: jwtAuthorizer } }
+  # CM-06
+  deleteCi:
+    handler: handlers/cis.deleteCi
+    events:
+      - httpApi: { method: DELETE, path: "/cis/{id}", authorizer: { name: jwtAuthorizer } }
+  # CM-07
+  listCiRelations:
+    handler: handlers/cis.listCiRelations
+    events:
+      - httpApi: { method: GET, path: "/cis/{id}/relations", authorizer: { name: jwtAuthorizer } }
+  # CM-08
+  listCiTypes:
+    handler: handlers/cis.listCiTypes
+    events:
+      - httpApi: { method: GET, path: /ci-types, authorizer: { name: jwtAuthorizer } }
+
   migrate:
     handler: handlers/migrate.handle   # se invoca a mano tras el deploy
     timeout: 300
+
+  # Consumidor SQS: ChangeImplemented -> aplica new_version a los CI
+  onChangeImplemented:
+    handler: handlers/consumers.on_change_implemented
+    timeout: 30
+    events:
+      - sqs: { arn: !GetAtt ChangesQueue.Arn, batchSize: 10, functionResponseType: ReportBatchItemFailures }
 
 resources:
   Resources:
@@ -61,3 +102,35 @@ resources:
         FunctionName: ${param:authorizerArn}
         Principal: apigateway.amazonaws.com
         SourceArn: !Join ["", ["arn:aws:execute-api:", !Ref AWS::Region, ":", !Ref AWS::AccountId, ":", !Ref HttpApi, "/*"]]
+
+    # ---- cmdb-changes-q: ChangeImplemented -> new_version + ci_history ----
+    ChangesDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: servidesk-cmdb-changes-dlq-${sls:stage}
+        MessageRetentionPeriod: 1209600
+    ChangesQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: servidesk-cmdb-changes-q-${sls:stage}
+        VisibilityTimeout: 180
+        RedrivePolicy: { deadLetterTargetArn: !GetAtt ChangesDLQ.Arn, maxReceiveCount: 3 }
+    ChangesQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues: [!Ref ChangesQueue]
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: { Service: sns.amazonaws.com }
+              Action: sqs:SendMessage
+              Resource: !GetAtt ChangesQueue.Arn
+              Condition: { ArnEquals: { aws:SourceArn: "${param:eventsTopicArn}" } }
+    ChangesSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: ${param:eventsTopicArn}
+        Protocol: sqs
+        Endpoint: !GetAtt ChangesQueue.Arn
+        RawMessageDelivery: true
+        FilterPolicy: { eventType: [ChangeImplemented] }
