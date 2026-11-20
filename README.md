@@ -19,5 +19,7 @@ Proyecto final de Cloud Computing. Monorepo con:
    - Windows PowerShell: `Get-Content .env | % { $k,$v = $_ -split '=',2; if ($k -and $k -notmatch '^#') { Set-Item "env:$k" $v } }`
 3. `npm install`
 4. `npm run deploy`  (instala el layer y despliega infra + 6 servicios con serverless-compose)
-5. Ejecutar la función `migrate` de cada servicio:
-   `npx serverless incidents:invoke --function migrate` (igual para identity, cmdb, problems, changes, requests).
+5. Ejecutar la función `migrate` de cada servicio, **empezando por identity** (crea `public.tenants` y las cuentas demo):
+   `npx serverless identity:invoke --function migrate` y luego igual para cmdb, incidents, problems, changes y requests.
+6. Probar el login con una cuenta demo (ver `services/identity/README.md`), por ejemplo
+   `andina` / `lucia.paredes@andina.pe` / `Andina#2026`.
