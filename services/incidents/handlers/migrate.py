@@ -94,7 +94,9 @@ def handle(event, context):
                 raise
 
     finally:
-        conn.close()
+        # No se cierra: get_conn() reutiliza la conexión entre invocaciones de la
+        # misma Lambda; cerrarla rompe la siguiente ejecución en un contenedor tibio.
+        pass
 
     return {
         "ok": True,

@@ -1485,7 +1485,7 @@ def changeRequestStatus(event, context):
             SET
                 status = :status,
                 fulfilled_at = CASE
-                    WHEN :status = 'fulfilled'
+                    WHEN CAST(:status AS varchar) = 'fulfilled'
                     THEN CURRENT_TIMESTAMP
                     ELSE fulfilled_at
                 END

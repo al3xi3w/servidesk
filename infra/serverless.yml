@@ -2,6 +2,7 @@
 # Responsable: Vannia (infra) + José (código del authorizer)
 service: servidesk-infra
 frameworkVersion: "3"
+configValidationMode: warn   # el esquema de Serverless v3 no lista python3.12 (AWS sí lo soporta)
 
 provider:
   name: aws
@@ -23,6 +24,12 @@ layers:
     path: layers/common
     compatibleRuntimes: [python3.12]
     description: pg8000, PyJWT y utilidades comunes (db, auth, events)
+    # Patrones propios: el "!**" global del servicio dejaría la capa vacía.
+    package:
+      patterns:
+        - "python/**"
+        - "!requirements.txt"
+        - "!**/__pycache__/**"
 
 functions:
   authorizer:

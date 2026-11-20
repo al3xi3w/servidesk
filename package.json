@@ -2,7 +2,7 @@
   "name": "servidesk",
   "private": true,
   "scripts": {
-    "layer": "pip install -r infra/layers/common/requirements.txt -t infra/layers/common/python --upgrade",
+    "layer": "node scripts/install-layer.mjs",
     "deploy": "npm run layer && serverless deploy",
     "remove": "serverless remove"
   },

@@ -7,7 +7,7 @@ TENANTS = ["tenant_andina", "tenant_pacifico", "tenant_unitec"]  # luego: leer d
 
 
 def handle(event, context):
-    sql = (pathlib.Path(__file__).parent.parent / "migrations" / "001_init.sql").read_text()
+    sql = (pathlib.Path(__file__).parent.parent / "migrations" / "001_init.sql").read_text(encoding="utf-8")
     ensure_database()
     conn = get_conn()
     for schema in TENANTS:
