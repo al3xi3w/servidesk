@@ -15,12 +15,17 @@ npm run layer
 
 # 3. Pruebas (cada una recrea su base db_<servicio>)
 python scripts/integration/it_identity.py
+python scripts/integration/it_services.py cmdb
 python scripts/integration/it_services.py incidents
 python scripts/integration/it_services.py problems
 python scripts/integration/it_services.py changes
 python scripts/integration/it_services.py requests
 
-# 4. Limpieza
+# 4. Flujo completo de la demo entre los 6 servicios (bus SNS -> SQS en memoria,
+#    suscripciones y FilterPolicy leídas de los serverless.yml reales)
+python scripts/integration/it_e2e.py
+
+# 5. Limpieza
 docker rm -f servidesk-pg
 ```
 

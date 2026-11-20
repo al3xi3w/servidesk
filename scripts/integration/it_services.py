@@ -236,6 +236,54 @@ def t_requests():
     check("aislamiento", res(rq.getRequest(ev(tenant="pacifico", path={"id": rid}), Ctx()))[0] == 404)
 
 
+# ======================================================================= cmdb
+def t_cmdb():
+    run_migrate()
+    from handlers import cis, consumers
+    s, b = res(cis.listCiTypes(ev(), Ctx()))
+    check("CM-08 6 tipos (idempotente)", s == 200 and len(b["data"]) == 6 and b["data"][0] == {"id": 1, "name": "Servidor"}, b)
+    team = str(uuid.uuid4())
+    s, b = res(cis.createCi(ev(body={"type_id": 1, "name": "srv-ventas-01", "environment": "prod", "version": "1.0",
+                                      "owner_team_id": team, "attributes": {"ip": "10.0.0.1", "tags": ["a"]}}), Ctx()))
+    check("CM-02 201", s == 201 and b["data"]["status"] == "operational" and b["data"]["attributes"]["tags"] == ["a"], b)
+    a = b["data"]["id"]
+    s, b = res(cis.createCi(ev(body={"type_id": 2, "name": "db-ventas", "environment": "qa"}), Ctx()))
+    bid = b["data"]["id"]
+    check("CM-02 sin opcionales", s == 201 and b["data"]["attributes"] == {} and b["data"]["version"] is None, b)
+    check("CM-02 tipo inexistente 400", res(cis.createCi(ev(body={"type_id": 99, "name": "x1", "environment": "dev"}), Ctx()))[0] == 400)
+    s, b = res(cis.listCis(ev(query={"environment": "prod,qa", "search": "ventas", "sort_by": "name", "sort_order": "asc"}), Ctx()))
+    check("CM-01 filtros", s == 200 and [c["name"] for c in b["data"]] == ["db-ventas", "srv-ventas-01"], b)
+    s, b = res(cis.listCis(ev(query={"owner_team_id": team, "type_id": "1"}), Ctx()))
+    check("CM-01 equipo y tipo", s == 200 and b["meta"]["total"] == 1, b)
+    s, b = res(cis.updateCi(ev(body={"name": "srv-ventas-02", "attributes": {"ip": "10.0.0.2"}, "version": "1.0"},
+                                path={"id": a}), Ctx()))
+    check("CM-04 200", s == 200 and b["data"]["name"] == "srv-ventas-02" and b["data"]["updated_at"] >= b["data"]["created_at"], b)
+    fields = sorted(r[0] for r in tenant_conn("tenant_andina").run(
+        "SELECT field FROM ci_history WHERE ci_id = CAST(:a AS uuid)", a=a))
+    check("ci_history: created, name, attributes", fields == ["attributes", "created", "name"], fields)
+    tenant_conn("tenant_andina").run("INSERT INTO ci_relations (source_ci_id, target_ci_id, relation) "
+                                     "VALUES (CAST(:a AS uuid), CAST(:b AS uuid), 'depends_on')", a=a, b=bid)
+    s, b = res(cis.listCiRelations(ev(path={"id": bid}), Ctx()))
+    check("CM-07 relación entrante", s == 200 and b["data"][0]["direction"] == "incoming"
+          and b["data"][0]["ci"]["name"] == "srv-ventas-02" and b["data"][0]["ci"]["type_name"] == "Servidor", b)
+    PUBLISHED.clear()
+    s, b = res(cis.changeCiStatus(ev(body={"status": "down"}, path={"id": a}), Ctx()))
+    check("CM-05 down + CIStatusChanged", s == 200 and PUBLISHED[-1]["data"]["previousStatus"] == "operational", PUBLISHED)
+    check("CM-05 mismo estado 409", res(cis.changeCiStatus(ev(body={"status": "down"}, path={"id": a}), Ctx()))[0] == 409)
+    check("CM-06 agente 403", cis.deleteCi(ev(path={"id": a}), Ctx())["statusCode"] == 403)
+    check("CM-06 admin 204", cis.deleteCi(ev(role="admin", user=ADMIN, path={"id": a}), Ctx())["statusCode"] == 204)
+    check("CM-06 repetido 204 sin evento", cis.deleteCi(ev(role="admin", user=ADMIN, path={"id": a}), Ctx())["statusCode"] == 204
+          and sum(p["event_type"] == "CIStatusChanged" for p in PUBLISHED) == 2, PUBLISHED)
+    check("CM-04 retirado 409", res(cis.updateCi(ev(body={"name": "otro"}, path={"id": a}), Ctx()))[0] == 409)
+    rec = sqs("ChangeImplemented", {"changeId": str(uuid.uuid4()), "cis": [{"ciId": bid, "newVersion": "2.0"},
+                                                                          {"ciId": a, "newVersion": "9.9"}]})
+    out = consumers.on_change_implemented({"Records": [rec, rec]}, None)
+    versions = dict((str(r[0]), r[1]) for r in tenant_conn("tenant_andina").run("SELECT id, version FROM configuration_items"))
+    check("cmdb-changes-q: versión aplicada, retirado intacto, duplicado ignorado",
+          out == {"batchItemFailures": []} and versions[bid] == "2.0" and versions[a] == "1.0", (out, versions))
+    check("aislamiento", res(cis.getCi(ev(tenant="pacifico", path={"id": bid}), Ctx()))[0] == 404)
+
+
 def reset_db():
     admin = _Orig(user="servidesk_admin", password="localpass123", host="localhost", port=PORT, database="postgres")
     admin.run(f"DROP DATABASE IF EXISTS db_{SERVICE} WITH (FORCE)")
@@ -245,7 +293,7 @@ def reset_db():
 reset_db()
 print(f"== {SERVICE}")
 try:
-    {"incidents": t_incidents, "problems": t_problems, "changes": t_changes, "requests": t_requests}[SERVICE]()
+    {"cmdb": t_cmdb, "incidents": t_incidents, "problems": t_problems, "changes": t_changes, "requests": t_requests}[SERVICE]()
 except Exception as exc:  # noqa: BLE001
     import traceback
     traceback.print_exc()
